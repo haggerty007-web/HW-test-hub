@@ -1,29 +1,27 @@
 import base64
 import calendar
-import csv
 import io
 import json
 import os
 import re
-import sqlite3
 import textwrap
 import uuid
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
+from supabase import create_client, Client
 
 try:
     from openai import OpenAI
-except Exception:  # pragma: no cover
+except Exception:
     OpenAI = None
 
 APP_NAME = "Homework Hub"
-DB_PATH = Path("data/homework_hub.sqlite")
 DEFAULT_MODEL = "gpt-4.1-mini"
+BUCKET_NAME = "homework-docs"
 
 
 # -----------------------------
@@ -91,122 +89,121 @@ st.markdown(
 
 
 # -----------------------------
-# Database helpers
+# Supabase connection
 # -----------------------------
-def get_db() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+@st.cache_resource
+def get_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 
-def init_db() -> None:
-    conn = get_db()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS assignments (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            class_name TEXT,
-            title TEXT NOT NULL,
-            description TEXT,
-            due_date TEXT,
-            due_time TEXT,
-            assignment_type TEXT,
-            estimated_effort_minutes INTEGER,
-            priority TEXT,
-            status TEXT NOT NULL DEFAULT 'Not started',
-            source TEXT,
-            uncertainty_notes TEXT
+def upload_image_to_storage(uploaded_file: Any, folder: str = "assignments") -> Optional[str]:
+    """Upload image to Supabase Storage and return the path."""
+    try:
+        supabase = get_supabase()
+        file_bytes = uploaded_file.getvalue()
+        ext = getattr(uploaded_file, "type", "image/jpeg").split("/")[-1]
+        if ext not in ["jpeg", "jpg", "png", "webp"]:
+            ext = "jpg"
+        filename = f"{folder}/{uuid.uuid4()}.{ext}"
+
+        supabase.storage.from_(BUCKET_NAME).upload(
+            path=filename,
+            file=file_bytes,
+            file_options={"content-type": getattr(uploaded_file, "type", "image/jpeg"), "upsert": "true"},
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS study_materials (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            class_name TEXT,
-            topic TEXT,
-            source_type TEXT,
-            original_text TEXT,
-            generated_markdown TEXT NOT NULL
-        )
-        """
-    )
-    conn.commit()
+        return filename
+    except Exception as e:
+        st.warning(f"Could not save image: {e}")
+        return None
 
 
-def query_df(sql: str, params: Tuple[Any, ...] = ()) -> pd.DataFrame:
-    conn = get_db()
-    return pd.read_sql_query(sql, conn, params=params)
+def get_image_url(image_path: Optional[str]) -> Optional[str]:
+    """Get a temporary signed URL for a private image."""
+    if not image_path:
+        return None
+    try:
+        supabase = get_supabase()
+        res = supabase.storage.from_(BUCKET_NAME).create_signed_url(image_path, 3600)  # 1 hour
+        return res.get("signedURL") or res.get("signedUrl")
+    except Exception:
+        return None
 
 
+def display_stored_image(image_path: Optional[str], caption: str = "Original photo") -> None:
+    url = get_image_url(image_path)
+    if url:
+        st.image(url, caption=caption, use_container_width=True)
+    else:
+        st.caption("Original photo not available.")
+
+
+# -----------------------------
+# Database helpers (Supabase)
+# -----------------------------
 def add_assignment(record: Dict[str, Any]) -> str:
-    assignment_id = str(uuid.uuid4())
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO assignments (
-            id, created_at, class_name, title, description, due_date, due_time,
-            assignment_type, estimated_effort_minutes, priority, status, source,
-            uncertainty_notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            assignment_id,
-            datetime.now().isoformat(timespec="seconds"),
-            record.get("class_name"),
-            record.get("title") or "Untitled assignment",
-            record.get("description"),
-            record.get("due_date"),
-            record.get("due_time"),
-            record.get("assignment_type"),
-            safe_int(record.get("estimated_effort_minutes")),
-            record.get("priority") or "Normal",
-            record.get("status") or "Not started",
-            record.get("source"),
-            record.get("uncertainty_notes"),
-        ),
-    )
-    conn.commit()
-    return assignment_id
+    supabase = get_supabase()
+    data = {
+        "class_name": record.get("class_name"),
+        "title": record.get("title") or "Untitled assignment",
+        "description": record.get("description"),
+        "due_date": record.get("due_date"),
+        "due_time": record.get("due_time"),
+        "assignment_type": record.get("assignment_type"),
+        "estimated_effort_minutes": safe_int(record.get("estimated_effort_minutes")),
+        "priority": record.get("priority") or "Normal",
+        "status": record.get("status") or "Not started",
+        "source": record.get("source"),
+        "uncertainty_notes": record.get("uncertainty_notes"),
+        "image_path": record.get("image_path"),
+    }
+    res = supabase.table("assignments").insert(data).execute()
+    return res.data[0]["id"]
 
 
 def update_assignment_status(assignment_id: str, status: str) -> None:
-    conn = get_db()
-    conn.execute("UPDATE assignments SET status = ? WHERE id = ?", (status, assignment_id))
-    conn.commit()
+    supabase = get_supabase()
+    supabase.table("assignments").update({"status": status}).eq("id", assignment_id).execute()
 
 
 def delete_assignment(assignment_id: str) -> None:
-    conn = get_db()
-    conn.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
-    conn.commit()
+    supabase = get_supabase()
+    # Optionally also delete the image from storage here
+    supabase.table("assignments").delete().eq("id", assignment_id).execute()
 
 
 def add_study_material(record: Dict[str, Any]) -> str:
-    material_id = str(uuid.uuid4())
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO study_materials (
-            id, created_at, class_name, topic, source_type, original_text,
-            generated_markdown
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            material_id,
-            datetime.now().isoformat(timespec="seconds"),
-            record.get("class_name"),
-            record.get("topic"),
-            record.get("source_type"),
-            record.get("original_text"),
-            record.get("generated_markdown"),
-        ),
-    )
-    conn.commit()
-    return material_id
+    supabase = get_supabase()
+    data = {
+        "class_name": record.get("class_name"),
+        "topic": record.get("topic"),
+        "source_type": record.get("source_type"),
+        "original_text": record.get("original_text"),
+        "generated_markdown": record.get("generated_markdown"),
+        "image_path": record.get("image_path"),
+    }
+    res = supabase.table("study_materials").insert(data).execute()
+    return res.data[0]["id"]
+
+
+def load_assignments(include_done: bool = True) -> pd.DataFrame:
+    supabase = get_supabase()
+    query = supabase.table("assignments").select("*")
+    if not include_done:
+        query = query.neq("status", "Done")
+    res = query.order("due_date", desc=False).execute()
+    df = pd.DataFrame(res.data or [])
+    if not df.empty and "due_date" in df.columns:
+        # Keep nulls at the end
+        df = df.sort_values(by=["due_date", "due_time"], na_position="last")
+    return df
+
+
+def load_study_materials() -> pd.DataFrame:
+    supabase = get_supabase()
+    res = supabase.table("study_materials").select("*").order("created_at", desc=True).execute()
+    return pd.DataFrame(res.data or [])
 
 
 # -----------------------------
@@ -229,7 +226,7 @@ def parse_iso_date(value: Optional[str]) -> Optional[date]:
     if not value:
         return None
     try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
     except Exception:
         return None
 
@@ -303,7 +300,7 @@ def parse_json_from_text(text: str) -> Dict[str, Any]:
 
 def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     try:
-        value = st.secrets.get(name)  # type: ignore[attr-defined]
+        value = st.secrets.get(name)
         if value:
             return str(value)
     except Exception:
@@ -419,6 +416,8 @@ Rules:
 - Use only information visible in the image.
 - If the image is incomplete or unclear, say what needs to be checked.
 - Keep it supportive and not overwhelming.
+- For literature: go beyond plot — include themes, character motivation, conflict, evidence, and possible essay questions.
+- For science/history: emphasize concepts, causes/effects, vocabulary in context, and application.
 """.strip()
 
 
@@ -460,6 +459,8 @@ Rules:
 - Use only information provided in the notes.
 - If the notes are incomplete or unclear, say what needs to be checked.
 - Keep it supportive and not overwhelming.
+- For literature: go beyond plot — include themes, character motivation, conflict, evidence, and possible essay questions.
+- For science/history: emphasize concepts, causes/effects, vocabulary in context, and application.
 """.strip()
 
 
@@ -516,21 +517,6 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 
 # -----------------------------
-# Data loading
-# -----------------------------
-def load_assignments(include_done: bool = True) -> pd.DataFrame:
-    sql = "SELECT * FROM assignments"
-    if not include_done:
-        sql += " WHERE status != 'Done'"
-    sql += " ORDER BY CASE WHEN due_date IS NULL THEN 1 ELSE 0 END, due_date ASC, due_time ASC, created_at DESC"
-    return query_df(sql)
-
-
-def load_study_materials() -> pd.DataFrame:
-    return query_df("SELECT * FROM study_materials ORDER BY created_at DESC")
-
-
-# -----------------------------
 # UI components
 # -----------------------------
 def assignment_card(row: pd.Series, show_actions: bool = True) -> None:
@@ -555,6 +541,10 @@ def assignment_card(row: pd.Series, show_actions: bool = True) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    if row.get("image_path"):
+        with st.expander("View original photo"):
+            display_stored_image(row.get("image_path"))
 
     if show_actions:
         col1, col2, col3 = st.columns(3)
@@ -640,16 +630,16 @@ def page_add_assignment() -> None:
         "How do you want to add it?",
         ["Photo", "Manual"],
         horizontal=True,
-        label_visibility="visible",
     )
 
     extracted: Dict[str, Any] = {}
     source = "Manual entry"
+    image_path = None
+    uploaded = None
 
     if method == "Photo":
         st.write("Take a photo or upload a screenshot/photo of the assignment.")
         capture_mode = st.radio("Photo source", ["Camera", "Upload"], horizontal=True)
-        uploaded = None
         if capture_mode == "Camera":
             uploaded = st.camera_input("Take a picture")
         else:
@@ -665,6 +655,7 @@ def page_add_assignment() -> None:
                             raw = call_openai_image(assignment_extraction_prompt(), uploaded)
                             extracted = parse_json_from_text(raw)
                             st.session_state["last_assignment_extract"] = extracted
+                            st.session_state["last_uploaded_file"] = uploaded
                             st.success("Review the extracted details below before saving.")
                         except Exception as exc:
                             st.error(f"I could not extract the assignment: {exc}")
@@ -672,6 +663,7 @@ def page_add_assignment() -> None:
                 st.warning("Add OPENAI_API_KEY in secrets to extract assignments from photos.")
 
     extracted = st.session_state.get("last_assignment_extract", extracted)
+    uploaded = st.session_state.get("last_uploaded_file", uploaded)
 
     with st.form("assignment_form", clear_on_submit=False):
         st.markdown("### Review & save")
@@ -715,6 +707,11 @@ def page_add_assignment() -> None:
             if not title.strip():
                 st.error("Please add an assignment title before saving.")
             else:
+                # Upload image if we have one
+                if uploaded is not None:
+                    with st.spinner("Saving photo..."):
+                        image_path = upload_image_to_storage(uploaded, folder="assignments")
+
                 add_assignment(
                     {
                         "class_name": class_name.strip(),
@@ -728,10 +725,12 @@ def page_add_assignment() -> None:
                         "status": status,
                         "source": source,
                         "uncertainty_notes": uncertainty.strip(),
+                        "image_path": image_path,
                     }
                 )
                 st.session_state.pop("last_assignment_extract", None)
-                st.success("Assignment saved.")
+                st.session_state.pop("last_uploaded_file", None)
+                st.success("Assignment saved (with photo if provided).")
                 st.rerun()
 
 
@@ -784,14 +783,18 @@ def page_study_tools() -> None:
         if source_type == "Text" and not notes_text.strip():
             st.error("Please paste notes first.")
             return
+
         with st.spinner("Creating study materials..."):
             try:
+                image_path = None
                 if source_type == "Photo":
                     generated = call_openai_image(study_prompt_from_image(output_type), uploaded)
                     original_text = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
+                    image_path = upload_image_to_storage(uploaded, folder="study")
                 else:
                     generated = call_openai_text(study_prompt_from_text(notes_text, output_type))
                     original_text = notes_text
+
                 add_study_material(
                     {
                         "class_name": class_name.strip(),
@@ -799,10 +802,11 @@ def page_study_tools() -> None:
                         "source_type": source_type,
                         "original_text": original_text,
                         "generated_markdown": generated,
+                        "image_path": image_path,
                     }
                 )
                 st.session_state["last_study_output"] = generated
-                st.success("Study material created and saved.")
+                st.success("Study material created and saved (with photo if provided).")
             except Exception as exc:
                 st.error(f"I could not generate study materials: {exc}")
 
@@ -817,6 +821,8 @@ def page_study_tools() -> None:
     else:
         for _, row in materials.head(10).iterrows():
             with st.expander(f"{row.get('class_name') or 'Class'} — {row.get('topic') or 'Study material'}"):
+                if row.get("image_path"):
+                    display_stored_image(row.get("image_path"), caption="Original photo")
                 st.markdown(row.get("generated_markdown") or "")
                 st.download_button(
                     "Download as Markdown",
@@ -904,8 +910,8 @@ def page_settings() -> None:
         3. Choose **Add to Home Screen**.
         4. Name it **Homework Hub**.
 
-        ### Data note
-        This MVP uses a local SQLite database. On Streamlit Community Cloud, local files are convenient for testing but are not a long-term database. For the next version, use Google Sheets, Supabase, or another hosted database for durable storage.
+        ### Data
+        Assignments, study materials, and original photos are now stored in **Supabase** (persistent).
         """
     )
 
@@ -914,21 +920,11 @@ def page_settings() -> None:
     st.download_button("Backup assignments CSV", data=df_to_csv_bytes(df), file_name="homework_hub_assignments_backup.csv", mime="text/csv")
     st.download_button("Backup study materials CSV", data=df_to_csv_bytes(materials), file_name="homework_hub_study_materials_backup.csv", mime="text/csv")
 
-    with st.expander("Danger zone"):
-        st.write("Use this only while testing.")
-        if st.button("Delete all assignments"):
-            conn = get_db()
-            conn.execute("DELETE FROM assignments")
-            conn.commit()
-            st.success("All assignments deleted.")
-            st.rerun()
-
 
 # -----------------------------
 # Main app
 # -----------------------------
 def main() -> None:
-    init_db()
     render_header()
 
     page = st.radio(

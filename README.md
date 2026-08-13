@@ -16,13 +16,11 @@ A mobile-first Streamlit app for tracking school assignments and turning class n
 
 ## Files
 
-```text
-homework_hub/
-  app.py
-  requirements.txt
-  README.md
-  .streamlit/
-    secrets.toml.example
+streamlit>=1.36
+openai>=1.54.0
+pandas>=2.2.0
+pillow>=10.0.0
+supabase>=2.4.0
 ```
 
 ## Local setup

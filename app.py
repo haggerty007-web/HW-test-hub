@@ -581,7 +581,7 @@ def render_ai_notice() -> None:
 # Pages
 # -----------------------------
 def page_today() -> None:
-    st.subheader("What’s due")
+    st.subheader("What should I work on?")
     df = load_assignments(include_done=False)
 
     if df.empty:

@@ -926,7 +926,7 @@ def page_all_assignments() -> None:
             st.write(f"Source: {row.get('source') or 'Not captured'}")
             if row.get("uncertainty_notes"):
                 st.warning(row.get("uncertainty_notes"))
-            ("Delete assignment", key=f"delete_{row['id']}"):
+            if st.button("Delete assignment", key=f"delete_{row['id']}"):
                 delete_assignment(row["id"])
                 st.success("Assignment deleted.")
                 st.rerun()

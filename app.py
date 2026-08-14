@@ -19,7 +19,7 @@ try:
 except Exception:
     OpenAI = None
 
-APP_NAME = "Homework Hub"
+APP_NAME = "Locked In"
 DEFAULT_MODEL = "gpt-4.1-mini"
 BUCKET_NAME = "homework-docs"
 

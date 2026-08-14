@@ -603,6 +603,7 @@ def page_today() -> None:
 
     if st.button("🔒 Lock In", key=f"lockin_{first_assignment['id']}", type="primary"):
         update_assignment_status(first_assignment["id"], "In progress")
+        st.session_state["locked_in_assignment_id"] = first_assignment["id"]
         st.success("Locked in. Let’s work on this one.")
         st.rerun()
 

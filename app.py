@@ -602,10 +602,10 @@ def page_today() -> None:
     assignment_card(first_assignment, show_actions=False)
 
     if st.button("🔒 Lock In", key=f"lockin_{first_assignment['id']}", type="primary"):
-    update_assignment_status(first_assignment["id"], "In progress")
-    st.success("Locked in. Let’s work on this one.")
-    st.rerun()
-    
+        update_assignment_status(first_assignment["id"], "In progress")
+        st.success("Locked in. Let’s work on this one.")
+        st.rerun()
+
     today = date.today()
     df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)
 

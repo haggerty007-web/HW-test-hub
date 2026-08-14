@@ -599,7 +599,7 @@ def page_today() -> None:
     st.markdown("### 🔒 Lock In")
     st.caption("Your best place to start.")
     first_assignment = df.iloc[0]
-    assignment_card(first_assignment)
+    assignment_card(first_assignment, show_actions=False)
 
     today = date.today()
     df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)

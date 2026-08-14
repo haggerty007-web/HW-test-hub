@@ -679,11 +679,11 @@ def page_add_assignment() -> None:
         if uploaded is not None:
             display_uploaded_image(uploaded, "Assignment source")
             source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
-            if ai_is_ready():
-                ("Extract assignment from photo", type="primary"):
-                    with st.spinner("Reading the image..."):
-                        try:
-                            raw = call_openai_image(assignment_extraction_prompt(), uploaded)
+           if ai_is_ready():
+            if st.button("Extract assignment from photo", type="primary"):
+                with st.spinner("Reading the image..."):
+                    try:
+                        raw = call_openai_image(assignment_extraction_prompt(), uploaded)
                             extracted = parse_json_from_text(raw)
                             st.session_state["last_assignment_extract"] = extracted
                             st.session_state["last_uploaded_file"] = uploaded

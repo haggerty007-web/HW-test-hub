@@ -604,8 +604,20 @@ def page_today() -> None:
     if st.button("🔒 Lock In", key=f"lockin_{first_assignment['id']}", type="primary"):
         update_assignment_status(first_assignment["id"], "In progress")
         st.session_state["locked_in_assignment_id"] = first_assignment["id"]
-        st.success("Locked in. Let’s work on this one.")
         st.rerun()
+
+    locked_id = st.session_state.get("locked_in_assignment_id")
+
+    if locked_id:
+        locked_rows = df[df["id"] == locked_id]
+
+    if not locked_rows.empty:
+        locked = locked_rows.iloc[0]
+
+        st.markdown("## 🔒 You're Locked In")
+        st.write(f"**{locked.get('title')}**")
+        st.write(f"{locked.get('class_name') or 'No class'}")
+        st.write(f"Estimated time: {locked.get('estimated_effort_minutes') or 30} minutes")
 
     today = date.today()
     df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)

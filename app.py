@@ -563,8 +563,8 @@ def assignment_card(row: pd.Series, show_actions: bool = True) -> None:
 
 
 def render_header() -> None:
-    st.markdown(f"<div class='big-title'>📚 {APP_NAME}</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>One place for assignments, due dates, and study help.</div>", unsafe_allow_html=True)
+    st.title(APP_NAME)
+    st.caption("One place for assignments, due dates, and study help.")
 
 
 def render_ai_notice() -> None:

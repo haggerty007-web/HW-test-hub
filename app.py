@@ -597,6 +597,7 @@ def page_today() -> None:
         return
 
     st.markdown("### 🔒 Lock In")
+    st.caption("Your best place to start.")
     first_assignment = df.iloc[0]
     assignment_card(first_assignment)
 

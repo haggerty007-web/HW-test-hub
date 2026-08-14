@@ -809,7 +809,7 @@ def page_study_tools() -> None:
     else:
         notes_text = st.text_area("Paste notes here", height=220)
 
-    ("Generate study help", type="primary"):
+    if st.button("Generate study help", type="primary"):
         if not ai_is_ready():
             st.error("Add OPENAI_API_KEY in Streamlit secrets to generate study tools.")
             return

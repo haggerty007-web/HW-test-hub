@@ -611,13 +611,16 @@ def page_today() -> None:
     if locked_id:
         locked_rows = df[df["id"] == locked_id]
 
-    if not locked_rows.empty:
-        locked = locked_rows.iloc[0]
+        if not locked_rows.empty:
+            locked = locked_rows.iloc[0]
 
-        st.markdown("## 🔒 You're Locked In")
-        st.write(f"**{locked.get('title')}**")
-        st.write(f"{locked.get('class_name') or 'No class'}")
-        st.write(f"Estimated time: {locked.get('estimated_effort_minutes') or 30} minutes")
+            st.markdown("## 🔒 You're Locked In")
+            st.write(f"**{locked.get('title')}**")
+            st.write(f"{locked.get('class_name') or 'No class'}")
+            st.write(
+                f"Estimated time: "
+                f"{locked.get('estimated_effort_minutes') or 30} minutes"
+            )
 
     today = date.today()
     df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)

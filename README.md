@@ -1,4 +1,4 @@
-# Homework Hub
+# Locked In
 
 A mobile-first Streamlit app for tracking school assignments and turning class notes or study guides into study materials.
 

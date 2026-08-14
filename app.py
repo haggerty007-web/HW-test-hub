@@ -621,6 +621,11 @@ def page_today() -> None:
                 f"Estimated time: "
                 f"{locked.get('estimated_effort_minutes') or 30} minutes"
             )
+            
+            if st.button("✅ I'm Done", key=f"finish_{locked['id']}"):
+                update_assignment_status(locked["id"], "Done")
+                st.session_state.pop("locked_in_assignment_id", None)
+                st.rerun()
 
     today = date.today()
     df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)
@@ -675,7 +680,7 @@ def page_add_assignment() -> None:
             display_uploaded_image(uploaded, "Assignment source")
             source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
             if ai_is_ready():
-                if st.button("Extract assignment from photo", type="primary"):
+                ("Extract assignment from photo", type="primary"):
                     with st.spinner("Reading the image..."):
                         try:
                             raw = call_openai_image(assignment_extraction_prompt(), uploaded)
@@ -799,7 +804,7 @@ def page_study_tools() -> None:
     else:
         notes_text = st.text_area("Paste notes here", height=220)
 
-    if st.button("Generate study help", type="primary"):
+    ("Generate study help", type="primary"):
         if not ai_is_ready():
             st.error("Add OPENAI_API_KEY in Streamlit secrets to generate study tools.")
             return
@@ -916,7 +921,7 @@ def page_all_assignments() -> None:
             st.write(f"Source: {row.get('source') or 'Not captured'}")
             if row.get("uncertainty_notes"):
                 st.warning(row.get("uncertainty_notes"))
-            if st.button("Delete assignment", key=f"delete_{row['id']}"):
+            ("Delete assignment", key=f"delete_{row['id']}"):
                 delete_assignment(row["id"])
                 st.success("Assignment deleted.")
                 st.rerun()

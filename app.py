@@ -680,6 +680,10 @@ def page_add_assignment() -> None:
             display_uploaded_image(uploaded, "Assignment source")
             source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
 
+        if uploaded is not None:
+            display_uploaded_image(uploaded, "Assignment source")
+            source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
+
             if ai_is_ready():
                 if st.button("Extract assignment from photo", type="primary"):
                     with st.spinner("Reading the image..."):

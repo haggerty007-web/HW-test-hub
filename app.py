@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Planner v5.2-fixed"
+APP_VERSION = "Planner v5.3-simplified"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1018,14 +1018,6 @@ def page_add_assignment() -> None:
     )
 
     if method == "Photo":
-        st.write("Take a photo of the weekly planner or an individual assignment.")
-
-        if st.button("Clear previous photo results"):
-            clear_assignment_capture_state()
-            st.session_state.pop("planner_structure", None)
-            st.session_state.pop("planner_selected_cells", None)
-            st.rerun()
-
         photo_mode = st.radio(
             "What are you photographing?",
             ["Weekly planner", "Single assignment"],
@@ -1051,25 +1043,25 @@ def page_add_assignment() -> None:
             prior_signature = st.session_state.get("planner_upload_signature")
 
             if prior_signature and current_signature != prior_signature:
-                st.session_state.pop("last_assignment_extracts", None)
-                st.session_state.pop("last_uploaded_file", None)
+                clear_assignment_capture_state()
                 st.session_state.pop("planner_structure", None)
-                st.session_state.pop("planner_selected_cells", None)
 
             st.session_state["planner_upload_signature"] = current_signature
-
             display_uploaded_image(uploaded, "Assignment source")
 
+            # -----------------------------
+            # WEEKLY PLANNER
+            # -----------------------------
             if photo_mode == "Weekly planner":
-                st.info(
-                    "For reliability, you choose which planner boxes contain real "
-                    "assignments. Locked In then reads only those boxes. "
-                    "No typing is required unless the handwriting is misread."
+                st.caption(
+                    "Scan the planner, then tap only the boxes that contain "
+                    "real assignments."
                 )
 
                 if ai_is_ready():
-                    if st.button("Prepare planner", type="primary"):
-                        st.session_state.pop("last_assignment_extracts", None)
+                    if st.button("Scan planner", type="primary"):
+                        clear_assignment_capture_state()
+                        st.session_state.pop("planner_structure", None)
 
                         with st.spinner("Reading dates and class rows..."):
                             try:
@@ -1077,7 +1069,7 @@ def page_add_assignment() -> None:
                                 st.session_state["planner_structure"] = structure
                                 st.session_state["last_uploaded_file"] = uploaded
                             except Exception as exc:
-                                st.error(f"I could not prepare the planner: {exc}")
+                                st.error(f"I could not scan the planner: {exc}")
                 else:
                     st.warning(
                         "Add OPENAI_API_KEY in secrets to read the planner."
@@ -1089,41 +1081,43 @@ def page_add_assignment() -> None:
                     dates = structure["dates"]
                     detected_classes = structure["classes"]
 
-                    st.markdown("### 1. Confirm class row order")
-                    st.caption(
-                        "The planner's class order can change. Correct any row "
-                        "that Locked In read incorrectly."
-                    )
+                    # Default to the detected order.
+                    confirmed_classes = list(detected_classes)
 
-                    confirmed_classes = []
-
-                    for row_index in range(7):
-                        detected = detected_classes[row_index]
-                        default_index = (
-                            PLANNER_SUBJECTS.index(detected)
-                            if detected in PLANNER_SUBJECTS
-                            else row_index
+                    # Keep corrections available, but out of the main flow.
+                    with st.expander("Class rows look wrong? Fix them here"):
+                        st.caption(
+                            "Only change these if Locked In put a subject "
+                            "on the wrong row."
                         )
 
-                        subject = st.selectbox(
-                            f"Row {row_index + 1}",
-                            PLANNER_SUBJECTS,
-                            index=default_index,
-                            key=f"planner_subject_row_{row_index}",
-                        )
-                        confirmed_classes.append(subject)
+                        corrected = []
 
-                    if len(set(confirmed_classes)) != 7:
-                        st.warning(
-                            "Each subject should appear once. Correct the duplicate "
-                            "row selections before reading assignments."
-                        )
+                        for row_index in range(7):
+                            detected = detected_classes[row_index]
+                            default_index = (
+                                PLANNER_SUBJECTS.index(detected)
+                                if detected in PLANNER_SUBJECTS
+                                else row_index
+                            )
 
-                    st.markdown("### 2. Select boxes that contain assignments")
-                    st.caption(
-                        "Check only the boxes where Meghan actually wrote a real "
-                        "assignment. Crossed-out items should stay unchecked."
-                    )
+                            subject = st.selectbox(
+                                f"Row {row_index + 1}",
+                                PLANNER_SUBJECTS,
+                                index=default_index,
+                                key=f"planner_subject_row_{row_index}",
+                            )
+                            corrected.append(subject)
+
+                        if len(set(corrected)) == 7:
+                            confirmed_classes = corrected
+                        else:
+                            st.warning(
+                                "Each subject should appear once. "
+                                "Using the detected row order until fixed."
+                            )
+
+                    st.markdown("### Tap the boxes with assignments")
 
                     required_days = [
                         "Monday",
@@ -1133,24 +1127,34 @@ def page_add_assignment() -> None:
                         "Friday",
                     ]
 
+                    # Compact header row.
+                    header_cols = st.columns([1.45, 1, 1, 1, 1, 1])
+                    header_cols[0].markdown("**Class**")
+
+                    for day_index, day_name in enumerate(required_days):
+                        due = parse_iso_date(dates[day_name])
+                        label = (
+                            due.strftime("%a\n%m/%d")
+                            if due
+                            else day_name[:3]
+                        )
+                        header_cols[day_index + 1].markdown(
+                            f"**{label.replace(chr(10), '<br>')}**",
+                            unsafe_allow_html=True,
+                        )
+
                     selected_cells = []
 
                     for row_index, class_name in enumerate(confirmed_classes):
-                        st.markdown(f"**{class_name}**")
-                        cols = st.columns(5)
+                        row_cols = st.columns([1.45, 1, 1, 1, 1, 1])
+                        row_cols[0].markdown(f"**{class_name}**")
 
                         for day_index, day_name in enumerate(required_days):
-                            due = parse_iso_date(dates[day_name])
-                            short_date = (
-                                due.strftime("%a %b %d")
-                                if due
-                                else day_name[:3]
-                            )
-
-                            with cols[day_index]:
+                            with row_cols[day_index + 1]:
                                 selected = st.checkbox(
-                                    short_date,
+                                    "Add",
                                     key=f"planner_cell_{row_index}_{day_name}",
+                                    label_visibility="collapsed",
                                 )
 
                                 if selected:
@@ -1163,97 +1167,78 @@ def page_add_assignment() -> None:
                                         }
                                     )
 
-                    st.caption(
-                        f"{len(selected_cells)} assignment box(es) selected."
-                    )
-
-                    with st.expander("Preview selected boxes"):
-                        if not selected_cells:
-                            st.caption("Select a planner box above to preview it.")
-                        else:
-                            for cell_info in selected_cells:
-                                st.markdown(
-                                    f"**{cell_info['class_name']} — "
-                                    f"{cell_info['day_name']}**"
-                                )
-                                preview = crop_planner_cell(
-                                    uploaded,
-                                    cell_info["row_index"],
-                                    cell_info["day_name"],
-                                )
-                                st.image(
-                                    preview,
-                                    use_container_width=True,
-                                )
-
                     if selected_cells:
+                        st.caption(
+                            f"{len(selected_cells)} assignment "
+                            f"box(es) selected."
+                        )
+
                         if st.button(
                             "Read selected assignments",
                             type="primary",
                         ):
-                            if len(set(confirmed_classes)) != 7:
-                                st.error(
-                                    "Fix the duplicate class rows before continuing."
-                                )
-                            else:
-                                st.session_state.pop(
-                                    "last_assignment_extracts",
-                                    None,
-                                )
+                            st.session_state.pop(
+                                "last_assignment_extracts",
+                                None,
+                            )
 
-                                extracted = []
+                            extracted = []
 
-                                with st.spinner(
-                                    "Transcribing the selected planner boxes..."
-                                ):
-                                    for cell_info in selected_cells:
-                                        try:
-                                            item = transcribe_selected_planner_cell(
-                                                uploaded_file=uploaded,
-                                                row_index=cell_info["row_index"],
-                                                class_name=cell_info["class_name"],
-                                                day_name=cell_info["day_name"],
-                                                due_date=cell_info["due_date"],
-                                            )
-                                            extracted.append(item)
-                                        except Exception as exc:
-                                            extracted.append(
-                                                {
-                                                    "class_name": cell_info[
-                                                        "class_name"
-                                                    ],
-                                                    "title": "[Please enter]",
-                                                    "description": "",
-                                                    "due_date": cell_info[
-                                                        "due_date"
-                                                    ],
-                                                    "due_time": None,
-                                                    "assignment_type": "Other",
-                                                    "estimated_effort_minutes": None,
-                                                    "priority": "Normal",
-                                                    "materials_needed": None,
-                                                    "uncertainty_notes": str(exc),
-                                                    "evidence": (
-                                                        "User-selected planner cell."
-                                                    ),
-                                                }
-                                            )
+                            with st.spinner(
+                                "Reading the selected boxes..."
+                            ):
+                                for cell_info in selected_cells:
+                                    try:
+                                        item = transcribe_selected_planner_cell(
+                                            uploaded_file=uploaded,
+                                            row_index=cell_info["row_index"],
+                                            class_name=cell_info["class_name"],
+                                            day_name=cell_info["day_name"],
+                                            due_date=cell_info["due_date"],
+                                        )
+                                        extracted.append(item)
+                                    except Exception as exc:
+                                        extracted.append(
+                                            {
+                                                "class_name": cell_info[
+                                                    "class_name"
+                                                ],
+                                                "title": "[Please enter]",
+                                                "description": "",
+                                                "due_date": cell_info[
+                                                    "due_date"
+                                                ],
+                                                "due_time": None,
+                                                "assignment_type": "Other",
+                                                "estimated_effort_minutes": None,
+                                                "priority": "Normal",
+                                                "materials_needed": None,
+                                                "uncertainty_notes": str(exc),
+                                                "evidence": (
+                                                    "User-selected planner cell."
+                                                ),
+                                            }
+                                        )
 
-                                st.session_state[
-                                    "last_assignment_extracts"
-                                ] = extracted
-                                st.session_state[
-                                    "last_uploaded_file"
-                                ] = uploaded
+                            st.session_state[
+                                "last_assignment_extracts"
+                            ] = extracted
+                            st.session_state[
+                                "last_uploaded_file"
+                            ] = uploaded
 
-                                st.rerun()
+                            st.rerun()
 
+            # -----------------------------
+            # SINGLE ASSIGNMENT PHOTO
+            # -----------------------------
             else:
-                # Existing one-photo extraction flow for an individual assignment.
                 if ai_is_ready():
-                    if st.button("Find assignment in photo", type="primary"):
-                        st.session_state.pop("last_assignment_extracts", None)
-                        st.session_state.pop("last_uploaded_file", None)
+                    if st.button(
+                        "Read assignment",
+                        type="primary",
+                    ):
+                        clear_assignment_capture_state()
 
                         with st.spinner("Reading the assignment..."):
                             try:
@@ -1262,7 +1247,10 @@ def page_add_assignment() -> None:
                                     uploaded,
                                 )
                                 result = parse_json_from_text(raw)
-                                assignments = result.get("assignments", [])
+                                assignments = result.get(
+                                    "assignments",
+                                    [],
+                                )
 
                                 st.session_state[
                                     "last_assignment_extracts"
@@ -1289,114 +1277,111 @@ def page_add_assignment() -> None:
         )
 
         if extracted_assignments:
-            st.markdown("### 3. Review and save")
-            st.caption(
-                "Locked In used the class and date from the box you selected. "
-                "Only correct the handwritten wording if needed."
-            )
+            st.markdown("### Review and save")
 
             reviewed_assignments = []
 
             for i, item in enumerate(extracted_assignments):
-                st.markdown("---")
-
-                include = st.checkbox(
-                    f"Include assignment {i + 1}",
-                    value=True,
-                    key=f"include_assignment_{i}",
-                )
-
-                class_name = st.text_input(
-                    "Class",
-                    value=item.get("class_name") or "",
-                    key=f"class_{i}",
-                    disabled=True if photo_mode == "Weekly planner" else False,
-                )
-
-                title = st.text_input(
-                    "Assignment",
-                    value=item.get("title") or "",
-                    key=f"title_{i}",
-                )
-
+                class_name_value = item.get("class_name") or ""
+                title_value = item.get("title") or ""
                 default_due = parse_iso_date(item.get("due_date"))
-                due_date_value = st.date_input(
-                    "Due date",
-                    value=default_due,
-                    format="YYYY-MM-DD",
-                    key=f"due_date_{i}",
-                    disabled=True if photo_mode == "Weekly planner" else False,
-                )
 
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    assignment_type = st.selectbox(
-                        "Type",
-                        [
-                            "Homework",
-                            "Quiz",
-                            "Test",
-                            "Project",
-                            "Reading",
-                            "Essay",
-                            "Other",
-                        ],
-                        index=type_index(item.get("assignment_type")),
-                        key=f"type_{i}",
+                with st.container(border=True):
+                    include = st.checkbox(
+                        f"Include assignment {i + 1}",
+                        value=True,
+                        key=f"include_assignment_{i}",
                     )
 
-                with col2:
-                    priority = st.selectbox(
-                        "Priority",
-                        ["Low", "Normal", "High"],
-                        index=priority_index(item.get("priority")),
-                        key=f"priority_{i}",
+                    st.markdown(
+                        f"**{class_name_value or 'Class'}"
+                        f" — {default_due.strftime('%a, %b %d') if default_due else 'Date unclear'}**"
                     )
 
-                effort = st.number_input(
-                    "Estimated minutes",
-                    min_value=0,
-                    max_value=600,
-                    step=5,
-                    value=safe_int(
-                        item.get("estimated_effort_minutes")
-                    ) or 30,
-                    key=f"effort_{i}",
-                )
+                    title = st.text_input(
+                        "Assignment",
+                        value=title_value,
+                        key=f"title_{i}",
+                    )
 
-                uncertainty = item.get("uncertainty_notes") or ""
+                    col1, col2 = st.columns(2)
 
-                if uncertainty:
-                    st.warning(f"Please check: {uncertainty}")
+                    with col1:
+                        assignment_type = st.selectbox(
+                            "Type",
+                            [
+                                "Homework",
+                                "Quiz",
+                                "Test",
+                                "Project",
+                                "Reading",
+                                "Essay",
+                                "Other",
+                            ],
+                            index=type_index(
+                                item.get("assignment_type")
+                            ),
+                            key=f"type_{i}",
+                        )
 
-                reviewed_assignments.append(
-                    {
-                        "include": include,
-                        "class_name": class_name,
-                        "title": title,
-                        "description": "",
-                        "due_date": (
-                            due_date_value.isoformat()
-                            if isinstance(due_date_value, date)
-                            else None
-                        ),
-                        "due_time": "",
-                        "assignment_type": assignment_type,
-                        "estimated_effort_minutes": int(effort),
-                        "priority": priority,
-                        "status": "Not started",
-                        "source": (
-                            f"Photo: "
-                            f"{getattr(saved_upload, 'name', 'planner photo')}"
-                        ),
-                        "uncertainty_notes": uncertainty,
-                    }
-                )
+                    with col2:
+                        priority = st.selectbox(
+                            "Priority",
+                            ["Low", "Normal", "High"],
+                            index=priority_index(
+                                item.get("priority")
+                            ),
+                            key=f"priority_{i}",
+                        )
 
-            st.markdown("---")
+                    effort = st.number_input(
+                        "Estimated minutes",
+                        min_value=0,
+                        max_value=600,
+                        step=5,
+                        value=safe_int(
+                            item.get("estimated_effort_minutes")
+                        ) or 30,
+                        key=f"effort_{i}",
+                    )
 
-            if st.button("Save Selected Assignments", type="primary"):
+                    uncertainty = (
+                        item.get("uncertainty_notes") or ""
+                    )
+
+                    if uncertainty:
+                        st.warning(f"Please check: {uncertainty}")
+
+                    reviewed_assignments.append(
+                        {
+                            "include": include,
+                            "class_name": class_name_value,
+                            "title": title,
+                            "description": "",
+                            "due_date": (
+                                default_due.isoformat()
+                                if isinstance(default_due, date)
+                                else None
+                            ),
+                            "due_time": "",
+                            "assignment_type": assignment_type,
+                            "estimated_effort_minutes": int(
+                                effort
+                            ),
+                            "priority": priority,
+                            "status": "Not started",
+                            "source": (
+                                f"Photo: "
+                                f"{getattr(saved_upload, 'name', 'planner photo')}"
+                            ),
+                            "uncertainty_notes": uncertainty,
+                        }
+                    )
+
+            if st.button(
+                "Save Selected Assignments",
+                type="primary",
+            ):
                 selected = [
                     item
                     for item in reviewed_assignments
@@ -1407,24 +1392,33 @@ def page_add_assignment() -> None:
                     item
                     for item in selected
                     if item["title"].strip()
-                    and item["title"].strip() != "[Please enter]"
+                    and item["title"].strip()
+                    != "[Please enter]"
                 ]
 
                 if not selected:
-                    st.error("Select at least one assignment to save.")
+                    st.error(
+                        "Select at least one assignment to save."
+                    )
+
                 elif len(valid) != len(selected):
                     st.error(
-                        "One selected assignment still needs its handwritten "
-                        "title corrected."
+                        "One selected assignment still needs "
+                        "its title corrected."
                     )
+
                 else:
                     image_path = None
 
                     if saved_upload is not None:
-                        with st.spinner("Saving planner photo..."):
-                            image_path = upload_image_to_storage(
-                                saved_upload,
-                                folder="assignments",
+                        with st.spinner(
+                            "Saving planner photo..."
+                        ):
+                            image_path = (
+                                upload_image_to_storage(
+                                    saved_upload,
+                                    folder="assignments",
+                                )
                             )
 
                     for item in valid:
@@ -1433,19 +1427,32 @@ def page_add_assignment() -> None:
                         add_assignment(item)
 
                     clear_assignment_capture_state()
-                    st.session_state.pop("planner_structure", None)
-                    st.session_state.pop("planner_selected_cells", None)
+                    st.session_state.pop(
+                        "planner_structure",
+                        None,
+                    )
 
-                    st.success(f"Saved {len(valid)} assignment(s).")
+                    st.success(
+                        f"Saved {len(valid)} assignment(s)."
+                    )
                     st.rerun()
 
+    # -----------------------------
+    # MANUAL ENTRY
+    # -----------------------------
     else:
-        with st.form("manual_assignment_form", clear_on_submit=True):
+        with st.form(
+            "manual_assignment_form",
+            clear_on_submit=True,
+        ):
             st.markdown("### Add manually")
 
             class_name = st.text_input("Class")
             title = st.text_input("Assignment title")
-            description = st.text_area("Description", height=90)
+            description = st.text_area(
+                "Description",
+                height=90,
+            )
 
             col1, col2 = st.columns(2)
 
@@ -1501,7 +1508,8 @@ def page_add_assignment() -> None:
             if submitted:
                 if not title.strip():
                     st.error(
-                        "Please add an assignment title before saving."
+                        "Please add an assignment title "
+                        "before saving."
                     )
                 else:
                     add_assignment(
@@ -1511,12 +1519,17 @@ def page_add_assignment() -> None:
                             "description": description.strip(),
                             "due_date": (
                                 due_date_value.isoformat()
-                                if isinstance(due_date_value, date)
+                                if isinstance(
+                                    due_date_value,
+                                    date,
+                                )
                                 else None
                             ),
                             "due_time": due_time.strip(),
                             "assignment_type": assignment_type,
-                            "estimated_effort_minutes": int(effort),
+                            "estimated_effort_minutes": int(
+                                effort
+                            ),
                             "priority": priority,
                             "status": "Not started",
                             "source": "Manual entry",

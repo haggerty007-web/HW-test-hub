@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v6-study"
+APP_VERSION = "Locked In v6.1-jsonfix"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -409,6 +409,52 @@ def call_openai_images(
     return response.output_text
 
 
+def call_openai_images_structured(
+    prompt: str,
+    image_bytes_list: List[bytes],
+    schema_name: str,
+    schema: Dict[str, Any],
+    model: str = PLANNER_MODEL,
+) -> Dict[str, Any]:
+    """
+    Use OpenAI Structured Outputs so planner JSON cannot be malformed.
+    """
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    content = [{"type": "input_text", "text": prompt}]
+
+    for image_bytes in image_bytes_list:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:image/jpeg;base64,{b64}",
+            }
+        )
+
+    response = client.responses.create(
+        model=model,
+        reasoning={"effort": "low"},
+        max_output_tokens=600,
+        input=[{"role": "user", "content": content}],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": schema_name,
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+
+    if not response.output_text:
+        raise RuntimeError("The planner reader returned no structured output.")
+
+    return json.loads(response.output_text)
+
+
 # Fixed template geometry, expressed as fractions of the normalized landscape
 # photo. These values are intentionally conservative and crop INSIDE the
 # planner cells so neighboring rows/columns are excluded.
@@ -508,20 +554,63 @@ Rules:
 def read_planner_structure(uploaded_file: Any) -> Dict[str, Any]:
     """
     Read only the printed weekday dates and dynamic subject-row order.
-    No assignments are inferred in this step.
+
+    Uses Structured Outputs so malformed JSON cannot break the scan.
     """
     img = normalized_planner_image(uploaded_file)
 
-    structure_raw = call_openai_images(
+    schema = {
+        "type": "object",
+        "properties": {
+            "dates": {
+                "type": "object",
+                "properties": {
+                    "Monday": {"type": "string"},
+                    "Tuesday": {"type": "string"},
+                    "Wednesday": {"type": "string"},
+                    "Thursday": {"type": "string"},
+                    "Friday": {"type": "string"},
+                },
+                "required": [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday",
+                ],
+                "additionalProperties": False,
+            },
+            "classes": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": PLANNER_SUBJECTS,
+                },
+                "minItems": 7,
+                "maxItems": 7,
+            },
+        },
+        "required": ["dates", "classes"],
+        "additionalProperties": False,
+    }
+
+    structure = call_openai_images_structured(
         planner_structure_prompt(),
         [pil_image_to_jpeg_bytes(img)],
+        schema_name="planner_structure",
+        schema=schema,
     )
-    structure = parse_json_from_text(structure_raw)
 
     dates = structure.get("dates") or {}
     classes = structure.get("classes") or []
 
-    required_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    required_days = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+    ]
 
     for day_name in required_days:
         if not dates.get(day_name):
@@ -543,6 +632,7 @@ def read_planner_structure(uploaded_file: Any) -> Dict[str, Any]:
         "dates": dates,
         "classes": classes,
     }
+
 
 
 def crop_planner_cell(

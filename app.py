@@ -20,7 +20,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_MODEL = "gpt-5.6-sol"
 BUCKET_NAME = "homework-docs"
 
 

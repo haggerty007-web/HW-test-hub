@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Planner v5.1-fast"
+APP_VERSION = "Planner v5.2-fixed"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -986,7 +986,7 @@ def page_today() -> None:
         if not part.empty:
             st.markdown(f"### {label}")
             for _, row in part.iterrows():
-                assignme
+                assignment_card(row)
 def clear_assignment_capture_state() -> None:
     for key in [
         "last_assignment_extracts",
@@ -1005,8 +1005,6 @@ def uploaded_file_signature(uploaded_file: Any) -> Optional[str]:
     except Exception:
         return None
 
-
-nt_card(row)
 
 
 def page_add_assignment() -> None:

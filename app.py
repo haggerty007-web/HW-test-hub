@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Planner v5.4-clear-dates"
+APP_VERSION = "Locked In v6-study"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -851,6 +851,173 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
+
+def assignment_material_source(assignment_id: str, source_kind: str) -> str:
+    return f"assignment:{assignment_id}:{source_kind}"
+
+
+def load_assignment_study_materials(assignment_id: str) -> pd.DataFrame:
+    """
+    Reuse the existing study_materials table without a database migration.
+    Assignment linkage is stored inside source_type.
+    """
+    materials = load_study_materials()
+
+    if materials.empty or "source_type" not in materials.columns:
+        return pd.DataFrame()
+
+    prefix = f"assignment:{assignment_id}:"
+    mask = (
+        materials["source_type"]
+        .fillna("")
+        .astype(str)
+        .str.startswith(prefix)
+    )
+
+    return materials[mask].copy()
+
+
+def assignment_study_prompt(
+    assignment: pd.Series,
+    output_type: str,
+) -> str:
+    return f"""
+You are helping a high school student prepare for ONE specific assignment.
+
+ASSIGNMENT:
+Class: {assignment.get('class_name') or 'Unknown'}
+Title: {assignment.get('title') or 'Assignment'}
+Type: {assignment.get('assignment_type') or 'Assignment'}
+Due date: {assignment.get('due_date') or 'Unknown'}
+
+You will receive a photo of class notes, a study guide, worksheet, textbook
+page, or teacher handout that belongs to this assignment.
+
+Create a student-friendly {output_type}.
+
+Use ONLY information visible in the uploaded material.
+Do not fill gaps with outside knowledge.
+
+For "study guide":
+- Give a concise summary.
+- Organize the important ideas by topic.
+- Include important terms and simple definitions.
+- End with "What to study first" and 3-5 priorities.
+
+For "flashcards":
+- Create 10-15 cards.
+- Use:
+  Q: ...
+  A: ...
+
+For "practice quiz":
+- Create 8-12 questions.
+- Mix recall and application when supported.
+- Put the answer key at the end.
+
+For "summary":
+- Produce a clean, concise summary in plain language.
+
+If the material is incomplete or unclear, say what needs to be checked.
+Keep the result calm, practical, and not overwhelming.
+""".strip()
+
+
+def render_locked_in_study_tools(locked: pd.Series) -> None:
+    st.markdown("### Study")
+    st.caption(
+        "Add class notes, study guides, worksheets, or handouts for this assignment."
+    )
+
+    materials = load_assignment_study_materials(str(locked["id"]))
+
+    if not materials.empty:
+        st.markdown(f"**Saved study materials: {len(materials)}**")
+
+        for _, material in materials.head(8).iterrows():
+            label = material.get("topic") or "Study material"
+
+            with st.expander(str(label)):
+                if material.get("image_path"):
+                    display_stored_image(
+                        material.get("image_path"),
+                        caption="Source material",
+                    )
+
+                st.markdown(
+                    material.get("generated_markdown") or ""
+                )
+
+    upload = st.file_uploader(
+        "Add a picture of notes or study material",
+        type=["png", "jpg", "jpeg", "webp"],
+        key=f"locked_study_upload_{locked['id']}",
+    )
+
+    output_type = st.selectbox(
+        "Create",
+        ["study guide", "flashcards", "practice quiz", "summary"],
+        key=f"locked_study_type_{locked['id']}",
+    )
+
+    if upload is not None:
+        display_uploaded_image(upload, "Study source")
+
+        if st.button(
+            f"Create {output_type}",
+            type="primary",
+            key=f"locked_study_generate_{locked['id']}",
+        ):
+            if not ai_is_ready():
+                st.error("AI is not configured.")
+                return
+
+            with st.spinner(f"Creating {output_type}..."):
+                try:
+                    generated = call_openai_image(
+                        assignment_study_prompt(
+                            locked,
+                            output_type,
+                        ),
+                        upload,
+                    )
+
+                    image_path = upload_image_to_storage(
+                        upload,
+                        folder="study",
+                    )
+
+                    add_study_material(
+                        {
+                            "class_name": locked.get("class_name"),
+                            "topic": (
+                                f"{locked.get('title') or 'Assignment'} — "
+                                f"{output_type.title()}"
+                            ),
+                            "source_type": assignment_material_source(
+                                str(locked["id"]),
+                                "photo",
+                            ),
+                            "original_text": (
+                                f"Study material for assignment "
+                                f"{locked.get('title') or locked['id']}"
+                            ),
+                            "generated_markdown": generated,
+                            "image_path": image_path,
+                        }
+                    )
+
+                    st.success(
+                        f"{output_type.title()} created and saved."
+                    )
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(
+                        f"I could not create the study material: {exc}"
+                    )
+
+
 # -----------------------------
 # UI components
 # -----------------------------
@@ -937,12 +1104,23 @@ def page_today() -> None:
     first_assignment = df.iloc[0]
     assignment_card(first_assignment, show_actions=False)
 
-    if st.button("🔒 Lock In", key=f"lockin_{first_assignment['id']}", type="primary"):
-        update_assignment_status(first_assignment["id"], "In progress")
-        st.session_state["locked_in_assignment_id"] = first_assignment["id"]
+    if st.button(
+        "🔒 Lock In",
+        key=f"lockin_{first_assignment['id']}",
+        type="primary",
+    ):
+        update_assignment_status(
+            first_assignment["id"],
+            "In progress",
+        )
+        st.session_state[
+            "locked_in_assignment_id"
+        ] = first_assignment["id"]
         st.rerun()
 
-    locked_id = st.session_state.get("locked_in_assignment_id")
+    locked_id = st.session_state.get(
+        "locked_in_assignment_id"
+    )
 
     if locked_id:
         locked_rows = df[df["id"] == locked_id]
@@ -952,24 +1130,71 @@ def page_today() -> None:
 
             st.markdown("## 🔒 You're Locked In")
             st.write(f"**{locked.get('title')}**")
-            st.write(f"{locked.get('class_name') or 'No class'}")
+            st.write(
+                f"{locked.get('class_name') or 'No class'} • "
+                f"{locked.get('assignment_type') or 'Assignment'}"
+            )
             st.write(
                 f"Estimated time: "
                 f"{locked.get('estimated_effort_minutes') or 30} minutes"
             )
-            
-            if st.button("✅ I'm Done", key=f"finish_{locked['id']}"):
-                update_assignment_status(locked["id"], "Done")
-                st.session_state.pop("locked_in_assignment_id", None)
-                st.rerun()
+
+            render_locked_in_study_tools(locked)
+
+            col_done, col_pause = st.columns(2)
+
+            with col_done:
+                if st.button(
+                    "✅ I'm Done",
+                    key=f"finish_{locked['id']}",
+                ):
+                    update_assignment_status(
+                        locked["id"],
+                        "Done",
+                    )
+                    st.session_state.pop(
+                        "locked_in_assignment_id",
+                        None,
+                    )
+                    st.rerun()
+
+            with col_pause:
+                if st.button(
+                    "Pause",
+                    key=f"pause_{locked['id']}",
+                ):
+                    st.session_state.pop(
+                        "locked_in_assignment_id",
+                        None,
+                    )
+                    st.rerun()
 
     today = date.today()
-    df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)
+    df["due_date_parsed"] = df["due_date"].apply(
+        parse_iso_date
+    )
 
-    overdue = df[df["due_date_parsed"].notna() & (df["due_date_parsed"] < today)]
-    today_df = df[df["due_date_parsed"] == today]
-    week_df = df[df["due_date_parsed"].notna() & (df["due_date_parsed"] > today) & (df["due_date_parsed"] <= today + timedelta(days=7))]
-    no_date = df[df["due_date_parsed"].isna()]
+    overdue = df[
+        df["due_date_parsed"].notna()
+        & (df["due_date_parsed"] < today)
+    ]
+
+    today_df = df[
+        df["due_date_parsed"] == today
+    ]
+
+    week_df = df[
+        df["due_date_parsed"].notna()
+        & (df["due_date_parsed"] > today)
+        & (
+            df["due_date_parsed"]
+            <= today + timedelta(days=7)
+        )
+    ]
+
+    no_date = df[
+        df["due_date_parsed"].isna()
+    ]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Overdue", len(overdue))
@@ -982,11 +1207,16 @@ def page_today() -> None:
         ("Next 7 days", week_df),
         ("No due date", no_date),
     ]
+
     for label, part in sections:
         if not part.empty:
             st.markdown(f"### {label}")
+
             for _, row in part.iterrows():
                 assignment_card(row)
+
+
+
 def clear_assignment_capture_state() -> None:
     for key in [
         "last_assignment_extracts",

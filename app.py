@@ -12,7 +12,58 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 from PIL import Image
-from supabase import create_client, Client
+from supabase import create_client, Clientdef assignment_extraction_prompt() -> str:
+    return f"""
+You are helping a high school student capture assignments from a photo.
+
+The image may contain:
+- a single assignment
+- a weekly student planner or agenda
+- a classroom board
+- an assignment sheet
+- a syllabus
+- a homework screenshot
+- handwritten notes
+
+IMPORTANT:
+- The image may be rotated or sideways. Read it in the correct orientation.
+- A planner may contain MULTIPLE assignments across different classes and dates.
+- Extract EVERY assignment you can reasonably identify.
+- Use the planner's row/class labels and column/date labels to associate each assignment with the correct class and due date.
+- Handwriting may be difficult to read. Do NOT guess unclear words or dates.
+- If something is uncertain, capture what you can and explain the uncertainty.
+
+Return ONLY valid JSON with this exact structure:
+
+{{
+  "assignments": [
+    {{
+      "class_name": string or null,
+      "title": string or null,
+      "description": string or null,
+      "due_date": string or null,
+      "due_time": string or null,
+      "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other" | null,
+      "estimated_effort_minutes": integer or null,
+      "priority": "Low" | "Normal" | "High",
+      "materials_needed": string or null,
+      "uncertainty_notes": string or null
+    }}
+  ]
+}}
+
+Rules:
+- Today is {date.today().isoformat()}.
+- due_date must use YYYY-MM-DD.
+- Pay close attention to printed planner dates.
+- Treat each separate assignment, quiz, test, reading, essay, or project as a separate item.
+- Do not create assignments from class names alone.
+- Do not invent missing class names, dates, titles, or instructions.
+- If handwriting is only partly legible, preserve the legible portion and explain the problem in uncertainty_notes.
+- Use High priority for tests, quizzes, major projects, essays, or anything due within 24 hours.
+- estimated_effort_minutes should be a practical student estimate only when reasonably supported; otherwise use null.
+- If no assignments can be confidently identified, return {{"assignments": []}}.
+""".strip()l
 
 try:
     from openai import OpenAI
@@ -712,10 +763,17 @@ def page_add_assignment() -> None:
                     with st.spinner("Reading the image..."):
                         try:
                             raw = call_openai_image(assignment_extraction_prompt(), uploaded)
-                            extracted = parse_json_from_text(raw)
-                            st.session_state["last_assignment_extract"] = extracted
+                            result = parse_json_from_text(raw)
+
+                            assignments = result.get("assignments", [])
+
+                            st.session_state["last_assignment_extracts"] = assignments
                             st.session_state["last_uploaded_file"] = uploaded
-                            st.success("Review the extracted details below before saving.")
+                            
+                            if assignments:
+                                st.success(f"Found {len(assignments)} assignment(s).")
+                            else:
+                                st.warning("I couldn't confidently identify any assignments in this photo.")
                         except Exception as exc:
                             st.error(f"I could not extract the assignment: {exc}")
             else:

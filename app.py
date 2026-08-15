@@ -12,9 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 from PIL import Image
-from supabase import create_client, Clientdef assignment_extraction_prompt() -> str:
-    return f"""
-You are helping a high school student capture assignments from a photo.
+from supabase import create_client, Client
 
 The image may contain:
 - a single assignment

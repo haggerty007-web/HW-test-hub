@@ -686,130 +686,384 @@ def page_add_assignment() -> None:
         horizontal=True,
     )
 
-    extracted: Dict[str, Any] = {}
-    source = "Manual entry"
-    image_path = None
-    uploaded = None
-
+    # -----------------------------
+    # PHOTO / PLANNER ENTRY
+    # -----------------------------
     if method == "Photo":
-        st.write("Take a photo or upload a screenshot/photo of the assignment.")
-        capture_mode = st.radio("Photo source", ["Camera", "Upload"], horizontal=True)
+        st.write(
+            "Take a photo of a planner, assignment sheet, classroom board, "
+            "or individual assignment."
+        )
+
+        capture_mode = st.radio(
+            "Photo source",
+            ["Camera", "Upload"],
+            horizontal=True,
+        )
+
         if capture_mode == "Camera":
             uploaded = st.camera_input("Take a picture")
         else:
-            uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg", "webp"])
+            uploaded = st.file_uploader(
+                "Upload image",
+                type=["png", "jpg", "jpeg", "webp"],
+            )
 
         if uploaded is not None:
             display_uploaded_image(uploaded, "Assignment source")
-            source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
-
-        if uploaded is not None:
-            display_uploaded_image(uploaded, "Assignment source")
-            source = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
 
             if ai_is_ready():
-                if st.button("Extract assignment from photo", type="primary"):
-                    with st.spinner("Reading the image..."):
+                if st.button(
+                    "Find assignments in photo",
+                    type="primary",
+                ):
+                    with st.spinner("Reading the planner..."):
                         try:
-                            raw = call_openai_image(assignment_extraction_prompt(), uploaded)
+                            raw = call_openai_image(
+                                assignment_extraction_prompt(),
+                                uploaded,
+                            )
                             result = parse_json_from_text(raw)
-
                             assignments = result.get("assignments", [])
 
-                            st.session_state["last_assignment_extracts"] = assignments
-                            st.session_state["last_uploaded_file"] = uploaded
-                            
+                            st.session_state[
+                                "last_assignment_extracts"
+                            ] = assignments
+                            st.session_state[
+                                "last_uploaded_file"
+                            ] = uploaded
+
                             if assignments:
-                                st.success(f"Found {len(assignments)} assignment(s).")
+                                st.success(
+                                    f"Found {len(assignments)} "
+                                    f"possible assignment(s). "
+                                    "Review them below."
+                                )
                             else:
-                                st.warning("I couldn't confidently identify any assignments in this photo.")
+                                st.warning(
+                                    "I couldn't confidently identify "
+                                    "any assignments in this photo."
+                                )
+
                         except Exception as exc:
-                            st.error(f"I could not extract the assignment: {exc}")
+                            st.error(
+                                f"I could not read the assignments: {exc}"
+                            )
             else:
-                st.warning("Add OPENAI_API_KEY in secrets to extract assignments from photos.")
+                st.warning(
+                    "Add OPENAI_API_KEY in secrets to extract "
+                    "assignments from photos."
+                )
 
-    extracted_assignments = st.session_state.get("last_assignment_extracts", [])
+        extracted_assignments = st.session_state.get(
+            "last_assignment_extracts",
+            [],
+        )
 
-    if extracted_assignments:
-        st.markdown("### Assignments found")
+        saved_upload = st.session_state.get(
+            "last_uploaded_file",
+            uploaded,
+        )
 
-        for i, item in enumerate(extracted_assignments, start=1):
-            st.markdown(f"**{i}. {item.get('class_name') or 'Class unknown'} — {item.get('title') or 'Assignment'}**")
-            st.write(f"Due: {item.get('due_date') or 'Date unclear'}")
-
-            if item.get("uncertainty_notes"):
-                st.warning(item.get("uncertainty_notes"))
-    extracted = st.session_state.get("last_assignment_extract", extracted)
-    uploaded = st.session_state.get("last_uploaded_file", uploaded)
-
-    with st.form("assignment_form", clear_on_submit=False):
-        st.markdown("### Review & save")
-        class_name = st.text_input("Class", value=extracted.get("class_name") or "")
-        title = st.text_input("Assignment title", value=extracted.get("title") or "")
-        description = st.text_area("Description", value=extracted.get("description") or "", height=90)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            default_due = parse_iso_date(extracted.get("due_date"))
-            due_date_value = st.date_input("Due date", value=default_due, format="YYYY-MM-DD") if default_due else st.date_input("Due date", value=None, format="YYYY-MM-DD")
-        with col2:
-            due_time = st.text_input("Due time", value=extracted.get("due_time") or "", placeholder="Example: 11:59 PM or 14:30")
-
-        col3, col4 = st.columns(2)
-        with col3:
-            assignment_type = st.selectbox(
-                "Type",
-                ["Homework", "Quiz", "Test", "Project", "Reading", "Essay", "Other"],
-                index=type_index(extracted.get("assignment_type")),
+        if extracted_assignments:
+            st.markdown("### Review assignments")
+            st.caption(
+                "Correct anything the AI misread and uncheck "
+                "anything that isn't a real assignment."
             )
-        with col4:
-            priority = st.selectbox("Priority", ["Low", "Normal", "High"], index=priority_index(extracted.get("priority")))
 
-        col5, col6 = st.columns(2)
-        with col5:
+            reviewed_assignments = []
+
+            for i, item in enumerate(extracted_assignments):
+                st.markdown("---")
+
+                include = st.checkbox(
+                    f"Include assignment {i + 1}",
+                    value=True,
+                    key=f"include_assignment_{i}",
+                )
+
+                class_name = st.text_input(
+                    "Class",
+                    value=item.get("class_name") or "",
+                    key=f"class_{i}",
+                )
+
+                title = st.text_input(
+                    "Assignment",
+                    value=item.get("title") or "",
+                    key=f"title_{i}",
+                )
+
+                description = st.text_area(
+                    "Description",
+                    value=item.get("description") or "",
+                    height=70,
+                    key=f"description_{i}",
+                )
+
+                default_due = parse_iso_date(
+                    item.get("due_date")
+                )
+
+                due_date_value = st.date_input(
+                    "Due date",
+                    value=default_due,
+                    format="YYYY-MM-DD",
+                    key=f"due_date_{i}",
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    assignment_type = st.selectbox(
+                        "Type",
+                        [
+                            "Homework",
+                            "Quiz",
+                            "Test",
+                            "Project",
+                            "Reading",
+                            "Essay",
+                            "Other",
+                        ],
+                        index=type_index(
+                            item.get("assignment_type")
+                        ),
+                        key=f"type_{i}",
+                    )
+
+                with col2:
+                    priority = st.selectbox(
+                        "Priority",
+                        ["Low", "Normal", "High"],
+                        index=priority_index(
+                            item.get("priority")
+                        ),
+                        key=f"priority_{i}",
+                    )
+
+                effort = st.number_input(
+                    "Estimated minutes",
+                    min_value=0,
+                    max_value=600,
+                    step=5,
+                    value=safe_int(
+                        item.get(
+                            "estimated_effort_minutes"
+                        )
+                    )
+                    or 30,
+                    key=f"effort_{i}",
+                )
+
+                uncertainty = (
+                    item.get("uncertainty_notes") or ""
+                )
+
+                if uncertainty:
+                    st.warning(
+                        f"Please check: {uncertainty}"
+                    )
+
+                reviewed_assignments.append(
+                    {
+                        "include": include,
+                        "class_name": class_name,
+                        "title": title,
+                        "description": description,
+                        "due_date": (
+                            due_date_value.isoformat()
+                            if isinstance(
+                                due_date_value,
+                                date,
+                            )
+                            else None
+                        ),
+                        "due_time": (
+                            item.get("due_time") or ""
+                        ),
+                        "assignment_type": assignment_type,
+                        "estimated_effort_minutes": int(
+                            effort
+                        ),
+                        "priority": priority,
+                        "status": "Not started",
+                        "source": (
+                            f"Photo: "
+                            f"{getattr(saved_upload, 'name', 'planner photo')}"
+                        ),
+                        "uncertainty_notes": uncertainty,
+                    }
+                )
+
+            st.markdown("---")
+
+            if st.button(
+                "Save Selected Assignments",
+                type="primary",
+            ):
+                selected = [
+                    item
+                    for item in reviewed_assignments
+                    if item["include"]
+                ]
+
+                valid = [
+                    item
+                    for item in selected
+                    if item["title"].strip()
+                ]
+
+                if not selected:
+                    st.error(
+                        "Select at least one assignment to save."
+                    )
+
+                elif len(valid) != len(selected):
+                    st.error(
+                        "Each selected assignment needs a title. "
+                        "Either add the missing title or uncheck "
+                        "that assignment."
+                    )
+
+                else:
+                    image_path = None
+
+                    if saved_upload is not None:
+                        with st.spinner(
+                            "Saving planner photo..."
+                        ):
+                            image_path = (
+                                upload_image_to_storage(
+                                    saved_upload,
+                                    folder="assignments",
+                                )
+                            )
+
+                    for item in valid:
+                        item["image_path"] = image_path
+                        item.pop("include", None)
+                        add_assignment(item)
+
+                    st.session_state.pop(
+                        "last_assignment_extracts",
+                        None,
+                    )
+                    st.session_state.pop(
+                        "last_uploaded_file",
+                        None,
+                    )
+
+                    st.success(
+                        f"Saved {len(valid)} assignment(s)."
+                    )
+                    st.rerun()
+
+    # -----------------------------
+    # MANUAL ENTRY
+    # -----------------------------
+    else:
+        with st.form(
+            "manual_assignment_form",
+            clear_on_submit=True,
+        ):
+            st.markdown("### Add manually")
+
+            class_name = st.text_input("Class")
+
+            title = st.text_input("Assignment title")
+
+            description = st.text_area(
+                "Description",
+                height=90,
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                due_date_value = st.date_input(
+                    "Due date",
+                    value=None,
+                    format="YYYY-MM-DD",
+                )
+
+            with col2:
+                due_time = st.text_input(
+                    "Due time",
+                    placeholder="Example: 11:59 PM",
+                )
+
+            col3, col4 = st.columns(2)
+
+            with col3:
+                assignment_type = st.selectbox(
+                    "Type",
+                    [
+                        "Homework",
+                        "Quiz",
+                        "Test",
+                        "Project",
+                        "Reading",
+                        "Essay",
+                        "Other",
+                    ],
+                )
+
+            with col4:
+                priority = st.selectbox(
+                    "Priority",
+                    ["Low", "Normal", "High"],
+                    index=1,
+                )
+
             effort = st.number_input(
                 "Estimated minutes",
                 min_value=0,
                 max_value=600,
                 step=5,
-                value=safe_int(extracted.get("estimated_effort_minutes")) or 30,
+                value=30,
             )
-        with col6:
-            status = st.selectbox("Status", ["Not started", "In progress", "Done"], index=0)
 
-        uncertainty = st.text_area("Notes / uncertainty", value=extracted.get("uncertainty_notes") or "", height=70)
+            submitted = st.form_submit_button(
+                "Save assignment",
+                type="primary",
+            )
 
-        submitted = st.form_submit_button("Save assignment", type="primary")
-        if submitted:
-            if not title.strip():
-                st.error("Please add an assignment title before saving.")
-            else:
-                # Upload image if we have one
-                if uploaded is not None:
-                    with st.spinner("Saving photo..."):
-                        image_path = upload_image_to_storage(uploaded, folder="assignments")
+            if submitted:
+                if not title.strip():
+                    st.error(
+                        "Please add an assignment title "
+                        "before saving."
+                    )
+                else:
+                    add_assignment(
+                        {
+                            "class_name": class_name.strip(),
+                            "title": title.strip(),
+                            "description": description.strip(),
+                            "due_date": (
+                                due_date_value.isoformat()
+                                if isinstance(
+                                    due_date_value,
+                                    date,
+                                )
+                                else None
+                            ),
+                            "due_time": due_time.strip(),
+                            "assignment_type": assignment_type,
+                            "estimated_effort_minutes": int(
+                                effort
+                            ),
+                            "priority": priority,
+                            "status": "Not started",
+                            "source": "Manual entry",
+                            "uncertainty_notes": "",
+                            "image_path": None,
+                        }
+                    )
 
-                add_assignment(
-                    {
-                        "class_name": class_name.strip(),
-                        "title": title.strip(),
-                        "description": description.strip(),
-                        "due_date": due_date_value.isoformat() if isinstance(due_date_value, date) else None,
-                        "due_time": due_time.strip(),
-                        "assignment_type": assignment_type,
-                        "estimated_effort_minutes": int(effort),
-                        "priority": priority,
-                        "status": status,
-                        "source": source,
-                        "uncertainty_notes": uncertainty.strip(),
-                        "image_path": image_path,
-                    }
-                )
-                st.session_state.pop("last_assignment_extract", None)
-                st.session_state.pop("last_uploaded_file", None)
-                st.success("Assignment saved (with photo if provided).")
-                st.rerun()
-
+                    st.success("Assignment saved.")
 
 def type_index(value: Optional[str]) -> int:
     options = ["Homework", "Quiz", "Test", "Project", "Reading", "Essay", "Other"]

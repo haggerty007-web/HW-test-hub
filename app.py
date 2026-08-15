@@ -349,36 +349,59 @@ def call_openai_image(prompt: str, uploaded_file: Any, model: str = DEFAULT_MODE
     )
     return response.output_text
 
-
 def assignment_extraction_prompt() -> str:
     return f"""
-You are helping a high school student manage assignments.
+You are helping a high school student capture assignments from a photo.
 
-Read the image. It may contain a classroom board, assignment sheet, syllabus, study guide, homework screenshot, or class notes.
+The image may contain:
+- a single assignment
+- a weekly student planner or agenda
+- a classroom board
+- an assignment sheet
+- a syllabus
+- a homework screenshot
+- handwritten notes
+
+IMPORTANT:
+- The image may be rotated or sideways. Read it in the correct orientation.
+- A planner may contain MULTIPLE assignments across different classes and dates.
+- Extract EVERY assignment you can reasonably identify.
+- Use the planner's row/class labels and column/date labels to associate each assignment with the correct class and due date.
+- Handwriting may be difficult to read. Do NOT guess unclear words or dates.
+- If something is uncertain, capture what you can and explain the uncertainty.
 
 Return ONLY valid JSON with this exact structure:
+
 {{
-  "class_name": string or null,
-  "title": string or null,
-  "description": string or null,
-  "due_date": string or null,
-  "due_time": string or null,
-  "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other" | null,
-  "estimated_effort_minutes": integer or null,
-  "priority": "Low" | "Normal" | "High",
-  "materials_needed": string or null,
-  "uncertainty_notes": string or null
+  "assignments": [
+    {{
+      "class_name": string or null,
+      "title": string or null,
+      "description": string or null,
+      "due_date": string or null,
+      "due_time": string or null,
+      "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other" | null,
+      "estimated_effort_minutes": integer or null,
+      "priority": "Low" | "Normal" | "High",
+      "materials_needed": string or null,
+      "uncertainty_notes": string or null
+    }}
+  ]
 }}
 
 Rules:
 - Today is {date.today().isoformat()}.
-- due_date must be ISO format YYYY-MM-DD.
-- If a date is unclear, use null and explain in uncertainty_notes.
-- Do not invent missing class names, dates, or instructions.
-- Keep the title short and clear.
+- due_date must use YYYY-MM-DD.
+- Pay close attention to printed planner dates.
+- Treat each separate assignment, quiz, test, reading, essay, or project as a separate item.
+- Do not create assignments from class names alone.
+- Do not invent missing class names, dates, titles, or instructions.
+- If handwriting is only partly legible, preserve the legible portion and explain the problem in uncertainty_notes.
 - Use High priority for tests, quizzes, major projects, essays, or anything due within 24 hours.
-- estimated_effort_minutes should be a practical student estimate when supported or obvious; otherwise null.
+- estimated_effort_minutes should be a practical student estimate only when reasonably supported; otherwise use null.
+- If no assignments can be confidently identified, return {{"assignments": []}}.
 """.strip()
+
 
 
 def study_prompt_from_image(output_type: str) -> str:

@@ -1,5 +1,6 @@
 import base64
 import calendar
+import hashlib
 import io
 import json
 import os
@@ -20,7 +21,9 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
+APP_VERSION = "Planner v5.1-fast"
 DEFAULT_MODEL = "gpt-5.6-sol"
+PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
 
 
@@ -350,7 +353,14 @@ def call_openai_image(prompt: str, uploaded_file: Any, model: str = DEFAULT_MODE
     return response.output_text
 
 
-def normalized_image_bytes(uploaded_file: Any) -> bytes:
+
+def normalized_planner_image(uploaded_file: Any) -> Image.Image:
+    """
+    Normalize the weekly planner photo into landscape orientation.
+
+    This planner uses the same printed template each week. Class order may
+    change, but the seven row bands and five weekday columns stay fixed.
+    """
     raw = uploaded_file.getvalue()
     img = Image.open(io.BytesIO(raw))
     img = ImageOps.exif_transpose(img)
@@ -358,223 +368,297 @@ def normalized_image_bytes(uploaded_file: Any) -> bytes:
     if img.height > img.width:
         img = img.rotate(90, expand=True)
 
-    if img.mode not in ("RGB", "L"):
+    if img.mode != "RGB":
         img = img.convert("RGB")
 
+    return img
+
+
+def pil_image_to_jpeg_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92)
+    img.save(buf, format="JPEG", quality=94)
     return buf.getvalue()
 
 
-def call_openai_image_bytes(prompt: str, image_bytes: bytes, model: str = DEFAULT_MODEL) -> str:
+def call_openai_images(
+    prompt: str,
+    image_bytes_list: List[bytes],
+    model: str = PLANNER_MODEL,
+) -> str:
     client = openai_client()
     if client is None:
         raise RuntimeError("OpenAI API key is not configured.")
 
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{b64}"
+    content = [{"type": "input_text", "text": prompt}]
+
+    for image_bytes in image_bytes_list:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:image/jpeg;base64,{b64}",
+            }
+        )
 
     response = client.responses.create(
         model=model,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            }
-        ],
+        reasoning={"effort": "low"},
+        max_output_tokens=600,
+        input=[{"role": "user", "content": content}],
     )
     return response.output_text
 
 
+# Fixed template geometry, expressed as fractions of the normalized landscape
+# photo. These values are intentionally conservative and crop INSIDE the
+# planner cells so neighboring rows/columns are excluded.
+PLANNER_SUBJECTS = [
+    "English",
+    "Science",
+    "Art",
+    "Algebra",
+    "Theo",
+    "Spanish",
+    "History",
+]
+
+# Calibrated against Meghan's actual planner photo.
+# Coordinates are fractions of the normalized landscape image.
+PLANNER_DAY_X = {
+    "Monday": (0.095, 0.254),
+    "Tuesday": (0.257, 0.402),
+    "Wednesday": (0.525, 0.664),
+    "Thursday": (0.667, 0.811),
+    "Friday": (0.814, 0.967),
+}
+
+# Seven subject rows, top to bottom.
+PLANNER_ROW_BOUNDS_Y = [
+    0.132,
+    0.213,
+    0.295,
+    0.378,
+    0.461,
+    0.544,
+    0.627,
+    0.710,
+]
+
+
+def crop_fraction(
+    img: Image.Image,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> Image.Image:
+    w, h = img.size
+    return img.crop(
+        (
+            max(0, int(w * x1)),
+            max(0, int(h * y1)),
+            min(w, int(w * x2)),
+            min(h, int(h * y2)),
+        )
+    )
+
+
 def planner_structure_prompt() -> str:
-    return f"""
-You are looking at a fixed-format weekly high-school planner.
+    allowed = json.dumps(PLANNER_SUBJECTS, ensure_ascii=False)
 
-Your ONLY task in this pass is to identify the planner structure.
-Do NOT extract assignments yet.
+    return f"""
+Read ONLY the printed weekday dates and the seven class labels from this
+weekly planner. Do not extract assignments.
+
+Allowed subjects are exactly:
+{allowed}
 
 Return ONLY valid JSON:
 {{
-  "dates": [
-    {{"day": "Monday", "date": "YYYY-MM-DD"}},
-    {{"day": "Tuesday", "date": "YYYY-MM-DD"}},
-    {{"day": "Wednesday", "date": "YYYY-MM-DD"}},
-    {{"day": "Thursday", "date": "YYYY-MM-DD"}},
-    {{"day": "Friday", "date": "YYYY-MM-DD"}}
-  ],
-  "classes": ["top class row", "next class row"]
+  "dates": {{
+    "Monday": "YYYY-MM-DD",
+    "Tuesday": "YYYY-MM-DD",
+    "Wednesday": "YYYY-MM-DD",
+    "Thursday": "YYYY-MM-DD",
+    "Friday": "YYYY-MM-DD"
+  }},
+  "classes": [
+    "subject for row 1",
+    "subject for row 2",
+    "subject for row 3",
+    "subject for row 4",
+    "subject for row 5",
+    "subject for row 6",
+    "subject for row 7"
+  ]
 }}
 
 Rules:
-- Read Monday through Friday from the PRINTED planner headers.
 - Today is {date.today().isoformat()}.
-- Convert each printed date to YYYY-MM-DD.
-- Read the class labels down the subject column in exact TOP-TO-BOTTOM order.
-- Class order can change from week to week.
-- Do not invent a class.
-- Do not treat assignment handwriting as a class label.
-- Do not return assignments in this pass.
+- Read the PRINTED weekday/date headers.
+- Convert each date to YYYY-MM-DD.
+- The seven class rows may be in a different order each week.
+- Every class MUST be chosen from the allowed subject list.
+- Use each allowed subject exactly once.
+- Never return Math, Music, Band, or any subject outside the allowed list.
+- Do not read assignment handwriting in this pass.
 """.strip()
 
 
-def planner_day_prompt(day_name: str, due_date: str, classes: List[str]) -> str:
-    return f"""
-Read ONLY the {day_name} / {due_date} column of this weekly planner.
+def read_planner_structure(uploaded_file: Any) -> Dict[str, Any]:
+    """
+    Read only the printed weekday dates and dynamic subject-row order.
+    No assignments are inferred in this step.
+    """
+    img = normalized_planner_image(uploaded_file)
 
-KNOWN CLASS ROWS, TOP TO BOTTOM:
-{json.dumps(classes, ensure_ascii=False)}
+    structure_raw = call_openai_images(
+        planner_structure_prompt(),
+        [pil_image_to_jpeg_bytes(img)],
+    )
+    structure = parse_json_from_text(structure_raw)
 
-Return ONLY valid JSON:
-{{
-  "assignments": [
-    {{
-      "class_name": string,
-      "title": string,
-      "description": string or null,
-      "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other",
-      "estimated_effort_minutes": integer or null,
-      "uncertainty_notes": string or null,
-      "evidence": string
-    }}
-  ]
-}}
+    dates = structure.get("dates") or {}
+    classes = structure.get("classes") or []
 
-Rules:
-- Every item MUST come from visible, uncrossed-out handwriting in the target column.
-- Ignore neighboring date columns.
-- Ignore crossed-out, scribbled-out, or cancelled text.
-- Blank cells contain no assignment.
-- Never create an assignment from the class label alone.
-- Use only one of the known class names, based on the row containing the handwriting.
-- Multi-line handwriting inside one cell normally represents ONE assignment.
-- Do not invent an assignment in a blank Math, History, English, or other cell.
-- If a word is unclear, preserve the readable portion and flag the uncertainty.
-- Do NOT infer the date. Every result in this pass belongs to {due_date}.
-- evidence must be short and visual.
-- If there are no visible assignments in this column, return {{"assignments": []}}.
-""".strip()
+    required_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
-
-def planner_verify_prompt(
-    day_name: str,
-    due_date: str,
-    classes: List[str],
-    candidates: List[Dict[str, Any]],
-) -> str:
-    return f"""
-Strictly verify assignments for ONLY the {day_name} / {due_date} column.
-
-KNOWN CLASS ROWS:
-{json.dumps(classes, ensure_ascii=False)}
-
-FIRST-PASS CANDIDATES:
-{json.dumps(candidates, ensure_ascii=False)}
-
-Return ONLY valid JSON:
-{{
-  "assignments": [
-    {{
-      "class_name": string,
-      "title": string,
-      "description": string or null,
-      "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other",
-      "estimated_effort_minutes": integer or null,
-      "uncertainty_notes": string or null,
-      "evidence": string
-    }}
-  ]
-}}
-
-Rules:
-- REMOVE anything not clearly supported by visible handwriting.
-- REMOVE crossed-out/scribbled-out/cancelled items.
-- CORRECT the class if the handwriting is in a different known row.
-- CORRECT the title if needed.
-- ADD a clearly visible assignment the first pass missed.
-- Do not add faint show-through from the reverse side.
-- Do not add printed planner text.
-- All results belong to {due_date}; do not infer another date.
-- When uncertain, prefer omission over invention.
-""".strip()
-
-
-def extract_planner_assignments(uploaded_file: Any) -> List[Dict[str, Any]]:
-    image_bytes = normalized_image_bytes(uploaded_file)
-
-    raw_structure = call_openai_image_bytes(planner_structure_prompt(), image_bytes)
-    structure = parse_json_from_text(raw_structure)
-
-    dates = structure.get("dates", [])
-    classes = [
-        str(c).strip()
-        for c in structure.get("classes", [])
-        if str(c).strip()
-    ]
-
-    final_assignments: List[Dict[str, Any]] = []
-
-    for day_info in dates:
-        day_name = str(day_info.get("day") or "").strip()
-        due_date = str(day_info.get("date") or "").strip()
-        if not day_name or not due_date:
-            continue
-
-        raw_day = call_openai_image_bytes(
-            planner_day_prompt(day_name, due_date, classes),
-            image_bytes,
-        )
-        candidates = parse_json_from_text(raw_day).get("assignments", [])
-
-        raw_verify = call_openai_image_bytes(
-            planner_verify_prompt(day_name, due_date, classes, candidates),
-            image_bytes,
-        )
-        verified = parse_json_from_text(raw_verify).get("assignments", [])
-
-        for item in verified:
-            title = str(item.get("title") or "").strip()
-            if not title:
-                continue
-
-            assignment_type = item.get("assignment_type") or "Other"
-            final_assignments.append(
-                {
-                    "class_name": str(item.get("class_name") or "").strip() or None,
-                    "title": title,
-                    "description": item.get("description"),
-                    "due_date": due_date,
-                    "due_time": None,
-                    "assignment_type": assignment_type,
-                    "estimated_effort_minutes": safe_int(
-                        item.get("estimated_effort_minutes")
-                    ),
-                    "priority": (
-                        "High"
-                        if assignment_type in {"Quiz", "Test", "Project", "Essay"}
-                        else "Normal"
-                    ),
-                    "materials_needed": None,
-                    "uncertainty_notes": item.get("uncertainty_notes"),
-                    "evidence": item.get("evidence"),
-                }
+    for day_name in required_days:
+        if not dates.get(day_name):
+            raise RuntimeError(
+                f"Could not confidently read the printed date for {day_name}."
             )
 
-    deduped = []
-    seen = set()
-    for item in final_assignments:
-        key = (
-            str(item.get("due_date") or "").lower(),
-            str(item.get("class_name") or "").lower(),
-            str(item.get("title") or "").lower(),
+    if (
+        len(classes) != 7
+        or len(set(classes)) != 7
+        or any(c not in PLANNER_SUBJECTS for c in classes)
+    ):
+        raise RuntimeError(
+            "Could not confidently map the seven class rows. "
+            "Please correct the row order below."
         )
-        if key not in seen:
-            seen.add(key)
-            deduped.append(item)
 
-    return deduped
+    return {
+        "dates": dates,
+        "classes": classes,
+    }
+
+
+def crop_planner_cell(
+    uploaded_file: Any,
+    row_index: int,
+    day_name: str,
+) -> Image.Image:
+    img = normalized_planner_image(uploaded_file)
+
+    y1 = PLANNER_ROW_BOUNDS_Y[row_index]
+    y2 = PLANNER_ROW_BOUNDS_Y[row_index + 1]
+    x1, x2 = PLANNER_DAY_X[day_name]
+
+    cell = crop_fraction(
+        img,
+        x1 + 0.004,
+        y1 + 0.004,
+        x2 - 0.004,
+        y2 - 0.004,
+    )
+
+    # Enlarge handwriting for the transcription model.
+    return cell.resize(
+        (cell.width * 4, cell.height * 4),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def planner_transcription_prompt(
+    class_name: str,
+    day_name: str,
+    due_date: str,
+) -> str:
+    return f"""
+You are transcribing handwriting from ONE planner cell that the user has
+already confirmed contains a real assignment.
+
+Known class: {class_name}
+Known day: {day_name}
+Known date: {due_date}
+
+Your task is TRANSCRIPTION, not interpretation.
+
+Return ONLY valid JSON:
+{{
+  "transcription": string,
+  "assignment_type": "Homework" | "Quiz" | "Test" | "Project" | "Reading" | "Essay" | "Other",
+  "uncertainty_notes": string or null
+}}
+
+Rules:
+- Copy only words that are visibly written in this cell.
+- Do not paraphrase.
+- Do not add instructions that are not visible.
+- Do not invent context, topics, chapters, labs, narratives, projects, or
+  descriptions.
+- Ignore crossed-out or cancelled writing.
+- If part of the handwriting is unreadable, use [unclear] for only that part.
+- If the visible writing says "quiz unit 1", return transcription
+  "quiz unit 1" — do not expand it.
+- If the visible writing says "vocab quiz", return transcription
+  "vocab quiz" — do not add study instructions.
+- assignment_type should be inferred only from visible words such as
+  quiz, test, reading, essay, project. Otherwise use Other.
+- Never change the class or date.
+""".strip()
+
+
+def transcribe_selected_planner_cell(
+    uploaded_file: Any,
+    row_index: int,
+    class_name: str,
+    day_name: str,
+    due_date: str,
+) -> Dict[str, Any]:
+    cell = crop_planner_cell(
+        uploaded_file=uploaded_file,
+        row_index=row_index,
+        day_name=day_name,
+    )
+
+    raw = call_openai_images(
+        planner_transcription_prompt(
+            class_name=class_name,
+            day_name=day_name,
+            due_date=due_date,
+        ),
+        [pil_image_to_jpeg_bytes(cell)],
+    )
+    result = parse_json_from_text(raw)
+
+    transcription = str(result.get("transcription") or "").strip()
+    if not transcription:
+        raise RuntimeError(
+            f"Could not transcribe {class_name} on {day_name}."
+        )
+
+    assignment_type = result.get("assignment_type") or "Other"
+
+    return {
+        "class_name": class_name,
+        "title": transcription,
+        "description": "",
+        "due_date": due_date,
+        "due_time": None,
+        "assignment_type": assignment_type,
+        "estimated_effort_minutes": None,
+        "priority": (
+            "High"
+            if assignment_type in {"Quiz", "Test", "Project", "Essay"}
+            else "Normal"
+        ),
+        "materials_needed": None,
+        "uncertainty_notes": result.get("uncertainty_notes"),
+        "evidence": f"User-selected {class_name} / {day_name} planner cell.",
+    }
 
 
 def assignment_extraction_prompt() -> str:
@@ -816,6 +900,7 @@ def assignment_card(row: pd.Series, show_actions: bool = True) -> None:
 def render_header() -> None:
     st.title(APP_NAME)
     st.caption("One place for assignments, due dates, and study help.")
+    st.caption(f"Build: {APP_VERSION}")
 
 
 def render_ai_notice() -> None:
@@ -901,7 +986,27 @@ def page_today() -> None:
         if not part.empty:
             st.markdown(f"### {label}")
             for _, row in part.iterrows():
-                assignment_card(row)
+                assignme
+def clear_assignment_capture_state() -> None:
+    for key in [
+        "last_assignment_extracts",
+        "last_uploaded_file",
+        "planner_upload_signature",
+        "planner_last_structure",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def uploaded_file_signature(uploaded_file: Any) -> Optional[str]:
+    if uploaded_file is None:
+        return None
+    try:
+        return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+    except Exception:
+        return None
+
+
+nt_card(row)
 
 
 def page_add_assignment() -> None:
@@ -917,13 +1022,23 @@ def page_add_assignment() -> None:
     if method == "Photo":
         st.write("Take a photo of the weekly planner or an individual assignment.")
 
+        if st.button("Clear previous photo results"):
+            clear_assignment_capture_state()
+            st.session_state.pop("planner_structure", None)
+            st.session_state.pop("planner_selected_cells", None)
+            st.rerun()
+
         photo_mode = st.radio(
             "What are you photographing?",
             ["Weekly planner", "Single assignment"],
             horizontal=True,
         )
 
-        capture_mode = st.radio("Photo source", ["Camera", "Upload"], horizontal=True)
+        capture_mode = st.radio(
+            "Photo source",
+            ["Camera", "Upload"],
+            horizontal=True,
+        )
 
         if capture_mode == "Camera":
             uploaded = st.camera_input("Take a picture")
@@ -934,25 +1049,216 @@ def page_add_assignment() -> None:
             )
 
         if uploaded is not None:
+            current_signature = uploaded_file_signature(uploaded)
+            prior_signature = st.session_state.get("planner_upload_signature")
+
+            if prior_signature and current_signature != prior_signature:
+                st.session_state.pop("last_assignment_extracts", None)
+                st.session_state.pop("last_uploaded_file", None)
+                st.session_state.pop("planner_structure", None)
+                st.session_state.pop("planner_selected_cells", None)
+
+            st.session_state["planner_upload_signature"] = current_signature
+
             display_uploaded_image(uploaded, "Assignment source")
 
-            if ai_is_ready():
-                button_label = (
-                    "Read weekly planner"
-                    if photo_mode == "Weekly planner"
-                    else "Find assignment in photo"
+            if photo_mode == "Weekly planner":
+                st.info(
+                    "For reliability, you choose which planner boxes contain real "
+                    "assignments. Locked In then reads only those boxes. "
+                    "No typing is required unless the handwriting is misread."
                 )
 
-                if st.button(button_label, type="primary"):
-                    with st.spinner(
-                        "Reading the planner..."
-                        if photo_mode == "Weekly planner"
-                        else "Reading the assignment..."
-                    ):
-                        try:
-                            if photo_mode == "Weekly planner":
-                                assignments = extract_planner_assignments(uploaded)
+                if ai_is_ready():
+                    if st.button("Prepare planner", type="primary"):
+                        st.session_state.pop("last_assignment_extracts", None)
+
+                        with st.spinner("Reading dates and class rows..."):
+                            try:
+                                structure = read_planner_structure(uploaded)
+                                st.session_state["planner_structure"] = structure
+                                st.session_state["last_uploaded_file"] = uploaded
+                            except Exception as exc:
+                                st.error(f"I could not prepare the planner: {exc}")
+                else:
+                    st.warning(
+                        "Add OPENAI_API_KEY in secrets to read the planner."
+                    )
+
+                structure = st.session_state.get("planner_structure")
+
+                if structure:
+                    dates = structure["dates"]
+                    detected_classes = structure["classes"]
+
+                    st.markdown("### 1. Confirm class row order")
+                    st.caption(
+                        "The planner's class order can change. Correct any row "
+                        "that Locked In read incorrectly."
+                    )
+
+                    confirmed_classes = []
+
+                    for row_index in range(7):
+                        detected = detected_classes[row_index]
+                        default_index = (
+                            PLANNER_SUBJECTS.index(detected)
+                            if detected in PLANNER_SUBJECTS
+                            else row_index
+                        )
+
+                        subject = st.selectbox(
+                            f"Row {row_index + 1}",
+                            PLANNER_SUBJECTS,
+                            index=default_index,
+                            key=f"planner_subject_row_{row_index}",
+                        )
+                        confirmed_classes.append(subject)
+
+                    if len(set(confirmed_classes)) != 7:
+                        st.warning(
+                            "Each subject should appear once. Correct the duplicate "
+                            "row selections before reading assignments."
+                        )
+
+                    st.markdown("### 2. Select boxes that contain assignments")
+                    st.caption(
+                        "Check only the boxes where Meghan actually wrote a real "
+                        "assignment. Crossed-out items should stay unchecked."
+                    )
+
+                    required_days = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                    ]
+
+                    selected_cells = []
+
+                    for row_index, class_name in enumerate(confirmed_classes):
+                        st.markdown(f"**{class_name}**")
+                        cols = st.columns(5)
+
+                        for day_index, day_name in enumerate(required_days):
+                            due = parse_iso_date(dates[day_name])
+                            short_date = (
+                                due.strftime("%a %b %d")
+                                if due
+                                else day_name[:3]
+                            )
+
+                            with cols[day_index]:
+                                selected = st.checkbox(
+                                    short_date,
+                                    key=f"planner_cell_{row_index}_{day_name}",
+                                )
+
+                                if selected:
+                                    selected_cells.append(
+                                        {
+                                            "row_index": row_index,
+                                            "class_name": class_name,
+                                            "day_name": day_name,
+                                            "due_date": dates[day_name],
+                                        }
+                                    )
+
+                    st.caption(
+                        f"{len(selected_cells)} assignment box(es) selected."
+                    )
+
+                    with st.expander("Preview selected boxes"):
+                        if not selected_cells:
+                            st.caption("Select a planner box above to preview it.")
+                        else:
+                            for cell_info in selected_cells:
+                                st.markdown(
+                                    f"**{cell_info['class_name']} — "
+                                    f"{cell_info['day_name']}**"
+                                )
+                                preview = crop_planner_cell(
+                                    uploaded,
+                                    cell_info["row_index"],
+                                    cell_info["day_name"],
+                                )
+                                st.image(
+                                    preview,
+                                    use_container_width=True,
+                                )
+
+                    if selected_cells:
+                        if st.button(
+                            "Read selected assignments",
+                            type="primary",
+                        ):
+                            if len(set(confirmed_classes)) != 7:
+                                st.error(
+                                    "Fix the duplicate class rows before continuing."
+                                )
                             else:
+                                st.session_state.pop(
+                                    "last_assignment_extracts",
+                                    None,
+                                )
+
+                                extracted = []
+
+                                with st.spinner(
+                                    "Transcribing the selected planner boxes..."
+                                ):
+                                    for cell_info in selected_cells:
+                                        try:
+                                            item = transcribe_selected_planner_cell(
+                                                uploaded_file=uploaded,
+                                                row_index=cell_info["row_index"],
+                                                class_name=cell_info["class_name"],
+                                                day_name=cell_info["day_name"],
+                                                due_date=cell_info["due_date"],
+                                            )
+                                            extracted.append(item)
+                                        except Exception as exc:
+                                            extracted.append(
+                                                {
+                                                    "class_name": cell_info[
+                                                        "class_name"
+                                                    ],
+                                                    "title": "[Please enter]",
+                                                    "description": "",
+                                                    "due_date": cell_info[
+                                                        "due_date"
+                                                    ],
+                                                    "due_time": None,
+                                                    "assignment_type": "Other",
+                                                    "estimated_effort_minutes": None,
+                                                    "priority": "Normal",
+                                                    "materials_needed": None,
+                                                    "uncertainty_notes": str(exc),
+                                                    "evidence": (
+                                                        "User-selected planner cell."
+                                                    ),
+                                                }
+                                            )
+
+                                st.session_state[
+                                    "last_assignment_extracts"
+                                ] = extracted
+                                st.session_state[
+                                    "last_uploaded_file"
+                                ] = uploaded
+
+                                st.rerun()
+
+            else:
+                # Existing one-photo extraction flow for an individual assignment.
+                if ai_is_ready():
+                    if st.button("Find assignment in photo", type="primary"):
+                        st.session_state.pop("last_assignment_extracts", None)
+                        st.session_state.pop("last_uploaded_file", None)
+
+                        with st.spinner("Reading the assignment..."):
+                            try:
                                 raw = call_openai_image(
                                     assignment_extraction_prompt(),
                                     uploaded,
@@ -960,25 +1266,20 @@ def page_add_assignment() -> None:
                                 result = parse_json_from_text(raw)
                                 assignments = result.get("assignments", [])
 
-                            st.session_state["last_assignment_extracts"] = assignments
-                            st.session_state["last_uploaded_file"] = uploaded
-
-                            if assignments:
-                                st.success(
-                                    f"Found {len(assignments)} possible assignment(s). "
-                                    "Review them below."
+                                st.session_state[
+                                    "last_assignment_extracts"
+                                ] = assignments
+                                st.session_state[
+                                    "last_uploaded_file"
+                                ] = uploaded
+                            except Exception as exc:
+                                st.error(
+                                    f"I could not read the assignment: {exc}"
                                 )
-                            else:
-                                st.warning(
-                                    "I couldn't confidently identify any assignments "
-                                    "in this photo."
-                                )
-                        except Exception as exc:
-                            st.error(f"I could not read the assignments: {exc}")
-            else:
-                st.warning(
-                    "Add OPENAI_API_KEY in secrets to extract assignments from photos."
-                )
+                else:
+                    st.warning(
+                        "Add OPENAI_API_KEY in secrets to extract assignments."
+                    )
 
         extracted_assignments = st.session_state.get(
             "last_assignment_extracts",
@@ -990,10 +1291,10 @@ def page_add_assignment() -> None:
         )
 
         if extracted_assignments:
-            st.markdown("### Review assignments")
+            st.markdown("### 3. Review and save")
             st.caption(
-                "Correct anything the AI misread and uncheck anything "
-                "that isn't a real assignment."
+                "Locked In used the class and date from the box you selected. "
+                "Only correct the handwritten wording if needed."
             )
 
             reviewed_assignments = []
@@ -1011,6 +1312,7 @@ def page_add_assignment() -> None:
                     "Class",
                     value=item.get("class_name") or "",
                     key=f"class_{i}",
+                    disabled=True if photo_mode == "Weekly planner" else False,
                 )
 
                 title = st.text_input(
@@ -1019,19 +1321,13 @@ def page_add_assignment() -> None:
                     key=f"title_{i}",
                 )
 
-                description = st.text_area(
-                    "Description",
-                    value=item.get("description") or "",
-                    height=70,
-                    key=f"description_{i}",
-                )
-
                 default_due = parse_iso_date(item.get("due_date"))
                 due_date_value = st.date_input(
                     "Due date",
                     value=default_due,
                     format="YYYY-MM-DD",
                     key=f"due_date_{i}",
+                    disabled=True if photo_mode == "Weekly planner" else False,
                 )
 
                 col1, col2 = st.columns(2)
@@ -1071,11 +1367,8 @@ def page_add_assignment() -> None:
                     key=f"effort_{i}",
                 )
 
-                evidence = item.get("evidence") or ""
                 uncertainty = item.get("uncertainty_notes") or ""
 
-                if evidence:
-                    st.caption(f"AI saw: {evidence}")
                 if uncertainty:
                     st.warning(f"Please check: {uncertainty}")
 
@@ -1084,13 +1377,13 @@ def page_add_assignment() -> None:
                         "include": include,
                         "class_name": class_name,
                         "title": title,
-                        "description": description,
+                        "description": "",
                         "due_date": (
                             due_date_value.isoformat()
                             if isinstance(due_date_value, date)
                             else None
                         ),
-                        "due_time": item.get("due_time") or "",
+                        "due_time": "",
                         "assignment_type": assignment_type,
                         "estimated_effort_minutes": int(effort),
                         "priority": priority,
@@ -1107,18 +1400,24 @@ def page_add_assignment() -> None:
 
             if st.button("Save Selected Assignments", type="primary"):
                 selected = [
-                    item for item in reviewed_assignments if item["include"]
+                    item
+                    for item in reviewed_assignments
+                    if item["include"]
                 ]
+
                 valid = [
-                    item for item in selected if item["title"].strip()
+                    item
+                    for item in selected
+                    if item["title"].strip()
+                    and item["title"].strip() != "[Please enter]"
                 ]
 
                 if not selected:
                     st.error("Select at least one assignment to save.")
                 elif len(valid) != len(selected):
                     st.error(
-                        "Each selected assignment needs a title. "
-                        "Either add the missing title or uncheck that assignment."
+                        "One selected assignment still needs its handwritten "
+                        "title corrected."
                     )
                 else:
                     image_path = None
@@ -1135,8 +1434,9 @@ def page_add_assignment() -> None:
                         item.pop("include", None)
                         add_assignment(item)
 
-                    st.session_state.pop("last_assignment_extracts", None)
-                    st.session_state.pop("last_uploaded_file", None)
+                    clear_assignment_capture_state()
+                    st.session_state.pop("planner_structure", None)
+                    st.session_state.pop("planner_selected_cells", None)
 
                     st.success(f"Saved {len(valid)} assignment(s).")
                     st.rerun()
@@ -1150,12 +1450,14 @@ def page_add_assignment() -> None:
             description = st.text_area("Description", height=90)
 
             col1, col2 = st.columns(2)
+
             with col1:
                 due_date_value = st.date_input(
                     "Due date",
                     value=None,
                     format="YYYY-MM-DD",
                 )
+
             with col2:
                 due_time = st.text_input(
                     "Due time",
@@ -1163,6 +1465,7 @@ def page_add_assignment() -> None:
                 )
 
             col3, col4 = st.columns(2)
+
             with col3:
                 assignment_type = st.selectbox(
                     "Type",
@@ -1176,6 +1479,7 @@ def page_add_assignment() -> None:
                         "Other",
                     ],
                 )
+
             with col4:
                 priority = st.selectbox(
                     "Priority",
@@ -1198,7 +1502,9 @@ def page_add_assignment() -> None:
 
             if submitted:
                 if not title.strip():
-                    st.error("Please add an assignment title before saving.")
+                    st.error(
+                        "Please add an assignment title before saving."
+                    )
                 else:
                     add_assignment(
                         {
@@ -1220,6 +1526,7 @@ def page_add_assignment() -> None:
                             "image_path": None,
                         }
                     )
+
                     st.success("Assignment saved.")
 
 
@@ -1414,6 +1721,11 @@ def page_settings() -> None:
 # Main app
 # -----------------------------
 def main() -> None:
+    # Prevent stale extraction results from surviving a code redeploy.
+    if st.session_state.get("capture_build_version") != APP_VERSION:
+        clear_assignment_capture_state()
+        st.session_state["capture_build_version"] = APP_VERSION
+
     render_header()
 
     page = st.radio(

@@ -351,26 +351,57 @@ def call_openai_image(prompt: str, uploaded_file: Any, model: str = DEFAULT_MODE
 
 def assignment_extraction_prompt() -> str:
     return f"""
-You are helping a high school student capture assignments from a photo.
+You are reading a high school student's planner or assignment photo.
 
-The image may contain:
-- a single assignment
-- a weekly student planner or agenda
-- a classroom board
-- an assignment sheet
-- a syllabus
-- a homework screenshot
-- handwritten notes
+Your job is to accurately identify assignments while preserving the
+spatial structure of the image.
 
-IMPORTANT:
-- The image may be rotated or sideways. Read it in the correct orientation.
-- A planner may contain MULTIPLE assignments across different classes and dates.
-- Extract EVERY assignment you can reasonably identify.
-- Use the planner's row/class labels and column/date labels to associate each assignment with the correct class and due date.
-- Handwriting may be difficult to read. Do NOT guess unclear words or dates.
-- If something is uncertain, capture what you can and explain the uncertainty.
+TODAY: {date.today().isoformat()}
 
-Return ONLY valid JSON with this exact structure:
+IMPORTANT: ACCURACY IS MORE IMPORTANT THAN QUANTITY.
+
+Before extracting assignments, silently analyze the image in this order:
+
+1. ORIENTATION
+- Determine the correct reading orientation even if the image is sideways
+  or rotated.
+
+2. PLANNER STRUCTURE
+If this is a planner or agenda:
+- Identify the printed DATE COLUMNS.
+- Identify the CLASS/SUBJECT ROWS.
+- Treat each intersection of a class row and date column as a separate cell.
+- Determine which cell each handwritten note is physically located inside.
+
+3. HANDWRITING
+- Read the handwriting inside each occupied cell.
+- Do not move handwriting into a neighboring row or date column.
+- Do not infer an assignment merely because a class name appears.
+- Blank cells contain NO assignment.
+- Printed planner text is not an assignment.
+- Do not invent words that cannot be read.
+
+4. ASSIGNMENT INTERPRETATION
+- Create an assignment only when visible handwriting or assignment text
+  supports one.
+- A note such as "Quiz vocab Friday" normally represents ONE assignment,
+  not separate "quiz" and "study vocab" assignments.
+- Study reminders that clearly refer to an upcoming quiz/test should normally
+  be included in that quiz/test's description rather than made into a
+  separate assignment.
+- If you are unsure whether something is a separate assignment, DO NOT create
+  an extra assignment. Put the uncertainty in uncertainty_notes instead.
+- Missing an unreadable word is preferable to inventing an assignment.
+
+5. DATE MAPPING
+- For planners, derive the due date from the printed date heading above the
+  cell containing the handwriting.
+- Do NOT choose a date based on nearby handwriting or another assignment.
+- Carefully verify the column before returning the date.
+- Convert the printed date to YYYY-MM-DD.
+- Do not assume the handwritten note itself contains the due date.
+
+Return ONLY valid JSON:
 
 {{
   "assignments": [
@@ -384,25 +415,72 @@ Return ONLY valid JSON with this exact structure:
       "estimated_effort_minutes": integer or null,
       "priority": "Low" | "Normal" | "High",
       "materials_needed": string or null,
-      "uncertainty_notes": string or null
+      "uncertainty_notes": string or null,
+      "evidence": string or null
     }}
   ]
 }}
 
-Rules:
-- Today is {date.today().isoformat()}.
-- due_date must use YYYY-MM-DD.
-- Pay close attention to printed planner dates.
-- Treat each separate assignment, quiz, test, reading, essay, or project as a separate item.
-- Do not create assignments from class names alone.
-- Do not invent missing class names, dates, titles, or instructions.
-- If handwriting is only partly legible, preserve the legible portion and explain the problem in uncertainty_notes.
-- Use High priority for tests, quizzes, major projects, essays, or anything due within 24 hours.
-- estimated_effort_minutes should be a practical student estimate only when reasonably supported; otherwise use null.
-- If no assignments can be confidently identified, return {{"assignments": []}}.
+FIELD RULES:
+
+class_name:
+- Use the printed class/subject row containing the handwriting.
+- Do not infer a different class from the assignment topic.
+
+title:
+- Use a short description based only on visible handwriting.
+- Preserve readable wording.
+- Do not embellish.
+
+description:
+- Include additional readable instructions from the same planner cell.
+- Do not pull text from neighboring cells.
+
+due_date:
+- Use the printed date column containing the assignment.
+- Format YYYY-MM-DD.
+- If the correct date cannot be determined confidently, return null.
+
+assignment_type:
+- Quiz if handwriting clearly indicates quiz.
+- Test if it clearly indicates test.
+- Reading if it clearly assigns reading.
+- Essay/Project/Homework only when supported.
+- Otherwise use Other.
+
+priority:
+- High for tests, quizzes, major projects, essays, or assignments due
+  within 24 hours.
+- Otherwise Normal unless there is a clear reason for Low.
+
+estimated_effort_minutes:
+- Estimate only when reasonably supported.
+- Otherwise null.
+
+uncertainty_notes:
+- Clearly state anything difficult to read or map.
+- Never hide uncertainty by guessing.
+
+evidence:
+- Give a SHORT location description only.
+- Example: "Science row, Thursday Aug 20 column; handwriting reads 'Ch 2 quiz'."
+- This is for verification, not reasoning.
+- Do not provide hidden reasoning or analysis.
+
+FINAL VERIFICATION BEFORE RETURNING:
+For every assignment:
+- Verify that visible assignment text exists.
+- Verify the class row.
+- Verify the date column.
+- Verify it is not duplicated.
+- Verify it was not created from printed text alone.
+
+Then scan all occupied planner cells one final time to make sure a clearly
+written assignment was not missed.
+
+If nothing can be confidently identified, return:
+{{"assignments": []}}
 """.strip()
-
-
 
 def study_prompt_from_image(output_type: str) -> str:
     return f"""

@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Planner v5.3-simplified"
+APP_VERSION = "Planner v5.4-clear-dates"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1127,34 +1127,26 @@ def page_add_assignment() -> None:
                         "Friday",
                     ]
 
-                    # Compact header row.
-                    header_cols = st.columns([1.45, 1, 1, 1, 1, 1])
-                    header_cols[0].markdown("**Class**")
-
-                    for day_index, day_name in enumerate(required_days):
-                        due = parse_iso_date(dates[day_name])
-                        label = (
-                            due.strftime("%a\n%m/%d")
-                            if due
-                            else day_name[:3]
-                        )
-                        header_cols[day_index + 1].markdown(
-                            f"**{label.replace(chr(10), '<br>')}**",
-                            unsafe_allow_html=True,
-                        )
-
                     selected_cells = []
 
+                    # Each checkbox carries its own weekday/date label so the
+                    # user never has to visually map a checkbox to a header.
                     for row_index, class_name in enumerate(confirmed_classes):
-                        row_cols = st.columns([1.45, 1, 1, 1, 1, 1])
-                        row_cols[0].markdown(f"**{class_name}**")
+                        st.markdown(f"**{class_name}**")
+                        row_cols = st.columns(5)
 
                         for day_index, day_name in enumerate(required_days):
-                            with row_cols[day_index + 1]:
+                            due = parse_iso_date(dates[day_name])
+                            date_label = (
+                                due.strftime("%a %m/%d")
+                                if due
+                                else day_name[:3]
+                            )
+
+                            with row_cols[day_index]:
                                 selected = st.checkbox(
-                                    "Add",
+                                    date_label,
                                     key=f"planner_cell_{row_index}_{day_name}",
-                                    label_visibility="collapsed",
                                 )
 
                                 if selected:
@@ -1166,6 +1158,8 @@ def page_add_assignment() -> None:
                                             "due_date": dates[day_name],
                                         }
                                     )
+
+                        st.markdown("---")
 
                     if selected_cells:
                         st.caption(

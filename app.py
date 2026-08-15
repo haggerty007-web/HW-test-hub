@@ -728,6 +728,17 @@ def page_add_assignment() -> None:
             else:
                 st.warning("Add OPENAI_API_KEY in secrets to extract assignments from photos.")
 
+    extracted_assignments = st.session_state.get("last_assignment_extracts", [])
+
+    if extracted_assignments:
+        st.markdown("### Assignments found")
+
+        for i, item in enumerate(extracted_assignments, start=1):
+            st.markdown(f"**{i}. {item.get('class_name') or 'Class unknown'} — {item.get('title') or 'Assignment'}**")
+            st.write(f"Due: {item.get('due_date') or 'Date unclear'}")
+
+            if item.get("uncertainty_notes"):
+                st.warning(item.get("uncertainty_notes"))
     extracted = st.session_state.get("last_assignment_extract", extracted)
     uploaded = st.session_state.get("last_uploaded_file", uploaded)
 

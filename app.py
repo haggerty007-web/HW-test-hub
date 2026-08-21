@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v6.1-jsonfix"
+APP_VERSION = "Locked In v6.2-ai-chat"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1108,6 +1108,139 @@ def render_locked_in_study_tools(locked: pd.Series) -> None:
                     )
 
 
+
+def build_assignment_study_context(locked: pd.Series) -> str:
+    parts = [
+        "ASSIGNMENT",
+        f"Class: {locked.get('class_name') or 'Unknown'}",
+        f"Title: {locked.get('title') or 'Assignment'}",
+        f"Type: {locked.get('assignment_type') or 'Assignment'}",
+        f"Due date: {locked.get('due_date') or 'Unknown'}",
+    ]
+
+    materials = load_assignment_study_materials(str(locked["id"]))
+
+    if not materials.empty:
+        parts.append("\nSAVED STUDY MATERIALS")
+
+        for i, (_, material) in enumerate(materials.head(12).iterrows(), start=1):
+            parts.append(
+                f"\n--- Material {i}: {material.get('topic') or 'Study material'} ---"
+            )
+            generated = str(material.get("generated_markdown") or "").strip()
+            if generated:
+                parts.append(generated)
+
+    return "\n".join(parts)
+
+
+def ask_locked_in_followup(
+    locked: pd.Series,
+    question: str,
+    history: List[Dict[str, str]],
+) -> str:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    study_context = build_assignment_study_context(locked)
+    recent_history = history[-8:]
+
+    conversation_text = []
+    for message in recent_history:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        conversation_text.append(f"{role.upper()}: {content}")
+
+    prompt = f"""
+You are Locked In, an AI study coach for a high school student.
+
+Answer follow-up questions about ONE assignment using the assignment context
+and saved study materials below.
+
+Rules:
+- Ground answers in the provided study materials whenever possible.
+- Do not invent facts that are not supported by those materials.
+- If the materials do not contain enough information, say that clearly.
+- You may explain, simplify, quiz, give examples, or help the student reason.
+- Keep answers concise, clear, and student-friendly.
+
+CONTEXT:
+{study_context}
+
+RECENT CONVERSATION:
+{chr(10).join(conversation_text)}
+
+NEW QUESTION:
+{question}
+""".strip()
+
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt}
+                ],
+            }
+        ],
+    )
+    return response.output_text
+
+
+def render_locked_in_followup_chat(locked: pd.Series) -> None:
+    st.markdown("### Ask Locked In")
+    st.caption(
+        "Ask follow-up questions about this assignment or the study materials."
+    )
+
+    chat_key = f"locked_chat_{locked['id']}"
+
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+
+    history = st.session_state[chat_key]
+
+    if history:
+        for message in history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    else:
+        st.info(
+            "Try: “Explain this in simpler terms,” “Quiz me on this,” "
+            "or “What should I study first?”"
+        )
+
+    question = st.chat_input(
+        "Ask a follow-up question...",
+        key=f"locked_chat_input_{locked['id']}",
+    )
+
+    if question:
+        history.append({"role": "user", "content": question})
+
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                try:
+                    answer = ask_locked_in_followup(
+                        locked,
+                        question,
+                        history,
+                    )
+                    st.markdown(answer)
+                    history.append(
+                        {"role": "assistant", "content": answer}
+                    )
+                except Exception as exc:
+                    st.error(f"I couldn't answer that question: {exc}")
+
+        st.session_state[chat_key] = history
+
+
 # -----------------------------
 # UI components
 # -----------------------------
@@ -1230,6 +1363,8 @@ def page_today() -> None:
             )
 
             render_locked_in_study_tools(locked)
+
+            render_locked_in_followup_chat(locked)
 
             col_done, col_pause = st.columns(2)
 

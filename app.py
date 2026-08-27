@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.0-beta-foundation"
+APP_VERSION = "Locked In v7.1-voice"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -382,6 +382,319 @@ def delete_my_class(class_name: str) -> None:
         .eq("class_name", class_name)
         .execute()
     )
+
+
+
+def transcribe_voice_note(audio_file: Any) -> str:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    # Streamlit's st.audio_input returns an UploadedFile-like object.
+    audio_bytes = io.BytesIO(audio_file.getvalue())
+    audio_bytes.name = getattr(audio_file, "name", "locked_in_voice.wav") or "locked_in_voice.wav"
+
+    result = client.audio.transcriptions.create(
+        model="gpt-4o-mini-transcribe",
+        file=audio_bytes,
+    )
+
+    transcript = getattr(result, "text", None)
+    if not transcript:
+        raise RuntimeError("I could not transcribe that recording.")
+
+    return str(transcript).strip()
+
+
+def interpret_school_updates(
+    transcript: str,
+    existing_assignments: pd.DataFrame,
+    classes: List[str],
+) -> Dict[str, Any]:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    existing = []
+    if not existing_assignments.empty:
+        for _, row in existing_assignments.iterrows():
+            existing.append(
+                {
+                    "id": str(row.get("id")),
+                    "class_name": row.get("class_name"),
+                    "title": row.get("title"),
+                    "due_date": row.get("due_date"),
+                    "status": row.get("status"),
+                }
+            )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "operations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "reschedule", "complete"],
+                        },
+                        "assignment_id": {"type": "string"},
+                        "class_name": {"type": "string"},
+                        "title": {"type": "string"},
+                        "due_date": {"type": "string"},
+                        "assignment_type": {
+                            "type": "string",
+                            "enum": [
+                                "Homework",
+                                "Quiz",
+                                "Test",
+                                "Project",
+                                "Reading",
+                                "Essay",
+                                "Other",
+                            ],
+                        },
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                        },
+                        "note": {"type": "string"},
+                    },
+                    "required": [
+                        "action",
+                        "assignment_id",
+                        "class_name",
+                        "title",
+                        "due_date",
+                        "assignment_type",
+                        "confidence",
+                        "note",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["operations"],
+        "additionalProperties": False,
+    }
+
+    prompt = f"""
+You convert a student's spoken school update into proposed changes for the
+Locked In assignment list.
+
+TODAY: {date.today().isoformat()}
+
+STUDENT'S CLASSES:
+{json.dumps(classes, ensure_ascii=False)}
+
+EXISTING OPEN ASSIGNMENTS:
+{json.dumps(existing, ensure_ascii=False)}
+
+STUDENT SAID:
+{transcript}
+
+Return proposed operations only. Nothing is applied automatically.
+
+Rules:
+- action "add": create a new assignment.
+- action "reschedule": change the due date of an existing assignment.
+- action "complete": mark an existing assignment Done.
+- For reschedule/complete, assignment_id MUST exactly match an ID from the
+  existing assignment list.
+- For add, assignment_id must be an empty string.
+- Resolve relative dates such as "Friday", "tomorrow", or "next Tuesday"
+  using TODAY.
+- due_date must be YYYY-MM-DD when a date is known, otherwise empty string.
+- For complete, due_date may be empty.
+- Use the student's existing class names when possible.
+- Do not invent an assignment the student did not mention.
+- If an existing assignment match is ambiguous, use confidence "low" and
+  explain the ambiguity in note.
+- Keep titles short and close to the student's wording.
+- Infer Quiz/Test/Essay/etc. only when the student's wording supports it;
+  otherwise use Other.
+""".strip()
+
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            }
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "locked_in_school_updates",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+
+    return json.loads(response.output_text)
+
+
+def update_assignment_due_date(
+    assignment_id: str,
+    due_date: str,
+) -> None:
+    supabase = get_supabase()
+    (
+        supabase.table("assignments")
+        .update({"due_date": due_date})
+        .eq("id", assignment_id)
+        .eq("user_id", require_user_id())
+        .execute()
+    )
+
+
+def apply_voice_operations(operations: List[Dict[str, Any]]) -> int:
+    applied = 0
+
+    for op in operations:
+        action = op.get("action")
+
+        if action == "add":
+            add_assignment(
+                {
+                    "class_name": op.get("class_name") or None,
+                    "title": op.get("title") or "Assignment",
+                    "description": "",
+                    "due_date": op.get("due_date") or None,
+                    "due_time": "",
+                    "assignment_type": op.get("assignment_type") or "Other",
+                    "estimated_effort_minutes": 30,
+                    "priority": (
+                        "High"
+                        if op.get("assignment_type") in {"Quiz", "Test", "Project", "Essay"}
+                        else "Normal"
+                    ),
+                    "status": "Not started",
+                    "source": "Voice",
+                    "uncertainty_notes": op.get("note") or "",
+                    "image_path": None,
+                }
+            )
+            applied += 1
+
+        elif action == "reschedule":
+            assignment_id = op.get("assignment_id") or ""
+            due_date = op.get("due_date") or ""
+            if assignment_id and due_date:
+                update_assignment_due_date(assignment_id, due_date)
+                applied += 1
+
+        elif action == "complete":
+            assignment_id = op.get("assignment_id") or ""
+            if assignment_id:
+                update_assignment_status(assignment_id, "Done")
+                applied += 1
+
+    return applied
+
+
+def render_tell_locked_in() -> None:
+    st.markdown("### 🎙️ Tell Locked In")
+    st.caption(
+        "Say what changed. Locked In will show you the proposed updates before saving anything."
+    )
+
+    classes = load_my_classes()
+    open_assignments = load_assignments(include_done=False)
+
+    if not classes:
+        st.info(
+            "Add your classes in Settings first so voice updates can match assignments reliably."
+        )
+
+    audio = st.audio_input("Record a school update")
+
+    if audio is not None:
+        st.audio(audio)
+
+        if st.button("Understand my update", type="primary"):
+            with st.spinner("Listening and organizing..."):
+                try:
+                    transcript = transcribe_voice_note(audio)
+                    st.session_state["voice_transcript"] = transcript
+
+                    result = interpret_school_updates(
+                        transcript,
+                        open_assignments,
+                        classes,
+                    )
+                    st.session_state["voice_operations"] = result.get(
+                        "operations",
+                        [],
+                    )
+                except Exception as exc:
+                    st.error(f"I couldn't understand that update: {exc}")
+
+    transcript = st.session_state.get("voice_transcript")
+    operations = st.session_state.get("voice_operations", [])
+
+    if transcript:
+        st.markdown("#### I heard")
+        st.info(transcript)
+
+    if operations:
+        st.markdown("#### Proposed changes")
+        st.caption("Nothing changes until you tap Confirm.")
+
+        for i, op in enumerate(operations, start=1):
+            action = op.get("action")
+            confidence = op.get("confidence")
+
+            if action == "add":
+                st.write(
+                    f"**{i}. ADD** — {op.get('class_name') or 'Class'}: "
+                    f"{op.get('title') or 'Assignment'}"
+                )
+                st.caption(
+                    f"Due {op.get('due_date') or 'date not specified'} • "
+                    f"{op.get('assignment_type') or 'Other'}"
+                )
+
+            elif action == "reschedule":
+                st.write(
+                    f"**{i}. CHANGE DATE** — {op.get('class_name') or 'Class'}: "
+                    f"{op.get('title') or 'Assignment'} → "
+                    f"{op.get('due_date') or 'date unclear'}"
+                )
+
+            elif action == "complete":
+                st.write(
+                    f"**{i}. COMPLETE** — {op.get('class_name') or 'Class'}: "
+                    f"{op.get('title') or 'Assignment'}"
+                )
+
+            if confidence != "high" or op.get("note"):
+                st.caption(
+                    f"Confidence: {confidence}. {op.get('note') or ''}"
+                )
+
+        col_confirm, col_cancel = st.columns(2)
+
+        with col_confirm:
+            if st.button("Confirm changes", type="primary"):
+                try:
+                    count = apply_voice_operations(operations)
+                    st.session_state.pop("voice_transcript", None)
+                    st.session_state.pop("voice_operations", None)
+                    st.success(f"Applied {count} change(s).")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"I couldn't apply the changes: {exc}")
+
+        with col_cancel:
+            if st.button("Cancel"):
+                st.session_state.pop("voice_transcript", None)
+                st.session_state.pop("voice_operations", None)
+                st.rerun()
 
 
 # -----------------------------
@@ -1642,10 +1955,14 @@ def page_add_assignment() -> None:
     render_ai_notice()
 
     method = st.radio(
-        "How do you want to add it?",
-        ["Photo", "Manual"],
+        "How do you want to update school?",
+        ["🎙️ Tell Locked In", "Quick Add", "Photo"],
         horizontal=True,
     )
+
+    if method == "🎙️ Tell Locked In":
+        render_tell_locked_in()
+        return
 
     if method == "Photo":
         photo_mode = st.radio(
@@ -2069,7 +2386,7 @@ def page_add_assignment() -> None:
             "manual_assignment_form",
             clear_on_submit=True,
         ):
-            st.markdown("### Add manually")
+            st.markdown("### Quick Add")
 
             class_name = st.text_input("Class")
             title = st.text_input("Assignment title")

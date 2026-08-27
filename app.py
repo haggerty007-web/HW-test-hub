@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v6.2-ai-chat"
+APP_VERSION = "Locked In v7.0-beta-foundation"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -94,11 +94,138 @@ st.markdown(
 # -----------------------------
 # Supabase connection
 # -----------------------------
-@st.cache_resource
 def get_supabase() -> Client:
+    """
+    Create a Supabase client for the current Streamlit session.
+
+    v7 intentionally does NOT cache this globally because each student must
+    have a separate authenticated Supabase session.
+    """
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    client = create_client(url, key)
+
+    access_token = st.session_state.get("sb_access_token")
+    refresh_token = st.session_state.get("sb_refresh_token")
+
+    if access_token and refresh_token:
+        try:
+            client.auth.set_session(access_token, refresh_token)
+        except Exception:
+            clear_auth_state()
+
+    return client
+
+
+def clear_auth_state() -> None:
+    for key in [
+        "sb_access_token",
+        "sb_refresh_token",
+        "user_id",
+        "user_email",
+        "locked_in_assignment_id",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def current_user_id() -> Optional[str]:
+    return st.session_state.get("user_id")
+
+
+def require_user_id() -> str:
+    user_id = current_user_id()
+    if not user_id:
+        raise RuntimeError("Please sign in first.")
+    return user_id
+
+
+def save_auth_session(auth_response: Any) -> bool:
+    session = getattr(auth_response, "session", None)
+    user = getattr(auth_response, "user", None)
+
+    if not session or not user:
+        return False
+
+    st.session_state["sb_access_token"] = session.access_token
+    st.session_state["sb_refresh_token"] = session.refresh_token
+    st.session_state["user_id"] = str(user.id)
+    st.session_state["user_email"] = getattr(user, "email", "") or ""
+    return True
+
+
+def render_auth_gate() -> bool:
+    """Return True only when a student is signed in."""
+    if current_user_id():
+        return True
+
+    st.title(APP_NAME)
+    st.caption("Your schoolwork. Your plan. One thing at a time.")
+    st.markdown("### Welcome to Locked In")
+
+    sign_in_tab, create_tab = st.tabs(["Sign in", "Create account"])
+
+    with sign_in_tab:
+        with st.form("signin_form"):
+            email = st.text_input("Email", key="signin_email")
+            password = st.text_input(
+                "Password",
+                type="password",
+                key="signin_password",
+            )
+            submitted = st.form_submit_button("Sign in", type="primary")
+
+        if submitted:
+            try:
+                client = create_client(
+                    st.secrets["SUPABASE_URL"],
+                    st.secrets["SUPABASE_KEY"],
+                )
+                response = client.auth.sign_in_with_password(
+                    {"email": email.strip(), "password": password}
+                )
+                if save_auth_session(response):
+                    st.rerun()
+                else:
+                    st.error("I could not start your session.")
+            except Exception as exc:
+                st.error(f"Sign in failed: {exc}")
+
+    with create_tab:
+        st.caption(
+            "Beta accounts keep each student's assignments and study materials separate."
+        )
+        with st.form("signup_form"):
+            email = st.text_input("Email", key="signup_email")
+            password = st.text_input(
+                "Create password",
+                type="password",
+                key="signup_password",
+            )
+            submitted = st.form_submit_button(
+                "Create account",
+                type="primary",
+            )
+
+        if submitted:
+            try:
+                client = create_client(
+                    st.secrets["SUPABASE_URL"],
+                    st.secrets["SUPABASE_KEY"],
+                )
+                response = client.auth.sign_up(
+                    {"email": email.strip(), "password": password}
+                )
+                if save_auth_session(response):
+                    st.success("Account created.")
+                    st.rerun()
+                else:
+                    st.success(
+                        "Account created. Check your email to confirm it, then sign in."
+                    )
+            except Exception as exc:
+                st.error(f"Account creation failed: {exc}")
+
+    return False
 
 
 def upload_image_to_storage(uploaded_file: Any, folder: str = "assignments") -> Optional[str]:
@@ -109,7 +236,7 @@ def upload_image_to_storage(uploaded_file: Any, folder: str = "assignments") -> 
         ext = getattr(uploaded_file, "type", "image/jpeg").split("/")[-1]
         if ext not in ["jpeg", "jpg", "png", "webp"]:
             ext = "jpg"
-        filename = f"{folder}/{uuid.uuid4()}.{ext}"
+        filename = f"{require_user_id()}/{folder}/{uuid.uuid4()}.{ext}"
 
         supabase.storage.from_(BUCKET_NAME).upload(
             path=filename,
@@ -160,6 +287,7 @@ def add_assignment(record: Dict[str, Any]) -> str:
         "source": record.get("source"),
         "uncertainty_notes": record.get("uncertainty_notes"),
         "image_path": record.get("image_path"),
+        "user_id": require_user_id(),
     }
     res = supabase.table("assignments").insert(data).execute()
     return res.data[0]["id"]
@@ -167,13 +295,13 @@ def add_assignment(record: Dict[str, Any]) -> str:
 
 def update_assignment_status(assignment_id: str, status: str) -> None:
     supabase = get_supabase()
-    supabase.table("assignments").update({"status": status}).eq("id", assignment_id).execute()
+    supabase.table("assignments").update({"status": status}).eq("id", assignment_id).eq("user_id", require_user_id()).execute()
 
 
 def delete_assignment(assignment_id: str) -> None:
     supabase = get_supabase()
     # Optionally also delete the image from storage here
-    supabase.table("assignments").delete().eq("id", assignment_id).execute()
+    supabase.table("assignments").delete().eq("id", assignment_id).eq("user_id", require_user_id()).execute()
 
 
 def add_study_material(record: Dict[str, Any]) -> str:
@@ -185,6 +313,7 @@ def add_study_material(record: Dict[str, Any]) -> str:
         "original_text": record.get("original_text"),
         "generated_markdown": record.get("generated_markdown"),
         "image_path": record.get("image_path"),
+        "user_id": require_user_id(),
     }
     res = supabase.table("study_materials").insert(data).execute()
     return res.data[0]["id"]
@@ -192,7 +321,7 @@ def add_study_material(record: Dict[str, Any]) -> str:
 
 def load_assignments(include_done: bool = True) -> pd.DataFrame:
     supabase = get_supabase()
-    query = supabase.table("assignments").select("*")
+    query = supabase.table("assignments").select("*").eq("user_id", require_user_id())
     if not include_done:
         query = query.neq("status", "Done")
     res = query.order("due_date", desc=False).execute()
@@ -205,8 +334,54 @@ def load_assignments(include_done: bool = True) -> pd.DataFrame:
 
 def load_study_materials() -> pd.DataFrame:
     supabase = get_supabase()
-    res = supabase.table("study_materials").select("*").order("created_at", desc=True).execute()
+    res = supabase.table("study_materials").select("*").eq("user_id", require_user_id()).order("created_at", desc=True).execute()
     return pd.DataFrame(res.data or [])
+
+
+def load_my_classes() -> List[str]:
+    supabase = get_supabase()
+    res = (
+        supabase.table("student_classes")
+        .select("class_name")
+        .eq("user_id", require_user_id())
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    return [
+        str(row.get("class_name")).strip()
+        for row in (res.data or [])
+        if row.get("class_name")
+    ]
+
+
+def add_my_class(class_name: str) -> None:
+    name = class_name.strip()
+    if not name:
+        return
+
+    supabase = get_supabase()
+    existing = load_my_classes()
+    if name.lower() in {c.lower() for c in existing}:
+        return
+
+    supabase.table("student_classes").insert(
+        {
+            "user_id": require_user_id(),
+            "class_name": name,
+            "sort_order": len(existing),
+        }
+    ).execute()
+
+
+def delete_my_class(class_name: str) -> None:
+    supabase = get_supabase()
+    (
+        supabase.table("student_classes")
+        .delete()
+        .eq("user_id", require_user_id())
+        .eq("class_name", class_name)
+        .execute()
+    )
 
 
 # -----------------------------
@@ -2158,6 +2333,51 @@ def page_all_assignments() -> None:
 def page_settings() -> None:
     st.subheader("Settings")
     render_ai_notice()
+
+    st.markdown("### My Classes")
+    st.caption(
+        "Set up your own classes. These will become the default choices for "
+        "assignment entry and voice commands in the beta."
+    )
+
+    classes = load_my_classes()
+
+    if classes:
+        for class_name in classes:
+            col_name, col_delete = st.columns([4, 1])
+            col_name.write(f"**{class_name}**")
+            with col_delete:
+                if st.button(
+                    "Remove",
+                    key=f"remove_class_{class_name}",
+                ):
+                    delete_my_class(class_name)
+                    st.rerun()
+    else:
+        st.info("No classes added yet.")
+
+    with st.form("add_class_form", clear_on_submit=True):
+        new_class = st.text_input(
+            "Add a class",
+            placeholder="e.g., Biology",
+        )
+        add_class = st.form_submit_button("Add class")
+
+    if add_class and new_class.strip():
+        add_my_class(new_class)
+        st.rerun()
+
+    st.markdown("### Account")
+    st.caption(st.session_state.get("user_email", ""))
+
+    if st.button("Sign out"):
+        try:
+            get_supabase().auth.sign_out()
+        except Exception:
+            pass
+        clear_auth_state()
+        st.rerun()
+
     st.markdown(
         """
         ### Add to iPhone Home Screen
@@ -2181,6 +2401,9 @@ def page_settings() -> None:
 # Main app
 # -----------------------------
 def main() -> None:
+    if not render_auth_gate():
+        return
+
     # Prevent stale extraction results from surviving a code redeploy.
     if st.session_state.get("capture_build_version") != APP_VERSION:
         clear_assignment_capture_state()

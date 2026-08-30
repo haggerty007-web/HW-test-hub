@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.3.5-1080p-camera"
+APP_VERSION = "Locked In v7.4-parent-dashboard"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1062,6 +1062,325 @@ def camera_input_hq(
         label,
         key=key,
     )
+
+
+
+def load_my_profile() -> Dict[str, Any]:
+    supabase = get_supabase()
+    res = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("user_id", require_user_id())
+        .limit(1)
+        .execute()
+    )
+    return (res.data or [{}])[0]
+
+
+def current_user_role() -> str:
+    profile = load_my_profile()
+    return str(profile.get("role") or "student")
+
+
+def load_linked_students() -> pd.DataFrame:
+    supabase = get_supabase()
+    res = (
+        supabase.table("parent_student_links")
+        .select("student_user_id,status,created_at")
+        .eq("parent_user_id", require_user_id())
+        .eq("status", "active")
+        .order("created_at", desc=False)
+        .execute()
+    )
+
+    links = pd.DataFrame(res.data or [])
+    if links.empty:
+        return links
+
+    student_ids = [
+        str(v)
+        for v in links["student_user_id"].dropna().tolist()
+    ]
+
+    names = {}
+    if student_ids:
+        try:
+            profile_res = (
+                supabase.table("profiles")
+                .select("user_id,display_name")
+                .in_("user_id", student_ids)
+                .execute()
+            )
+            for row in profile_res.data or []:
+                names[str(row.get("user_id"))] = (
+                    row.get("display_name") or ""
+                )
+        except Exception:
+            pass
+
+    links["display_name"] = links["student_user_id"].apply(
+        lambda uid: names.get(str(uid), "")
+    )
+    return links
+
+
+def load_student_assignments(
+    student_user_id: str,
+    include_done: bool = True,
+) -> pd.DataFrame:
+    supabase = get_supabase()
+    query = (
+        supabase.table("assignments")
+        .select("*")
+        .eq("user_id", student_user_id)
+    )
+
+    if not include_done:
+        query = query.neq("status", "Done")
+
+    res = query.order("due_date", desc=False).execute()
+    df = pd.DataFrame(res.data or [])
+
+    if not df.empty and "due_date" in df.columns:
+        df = df.sort_values(
+            by=["due_date", "due_time"],
+            na_position="last",
+        )
+
+    return df
+
+
+def load_student_study_materials(
+    student_user_id: str,
+) -> pd.DataFrame:
+    supabase = get_supabase()
+    res = (
+        supabase.table("study_materials")
+        .select("*")
+        .eq("user_id", student_user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+def load_student_test_reviews(
+    student_user_id: str,
+) -> pd.DataFrame:
+    supabase = get_supabase()
+    res = (
+        supabase.table("test_reviews")
+        .select("*")
+        .eq("user_id", student_user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+def load_student_study_activity(
+    student_user_id: str,
+) -> pd.DataFrame:
+    supabase = get_supabase()
+    try:
+        res = (
+            supabase.table("study_activity")
+            .select("*")
+            .eq("user_id", student_user_id)
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        return pd.DataFrame(res.data or [])
+    except Exception:
+        return pd.DataFrame()
+
+
+def parent_due_label(value: Any) -> str:
+    d = parse_iso_date(value)
+    if not d:
+        return "No due date"
+
+    today = date.today()
+    days = (d - today).days
+
+    if days < 0:
+        return f"Overdue • {d.strftime('%b %-d')}"
+    if days == 0:
+        return "Due today"
+    if days == 1:
+        return "Due tomorrow"
+    return d.strftime("%a, %b %-d")
+
+
+def render_parent_dashboard() -> None:
+    st.subheader("Parent Dashboard")
+    st.caption(
+        "A high-level view of school progress. Parent access is view-only."
+    )
+
+    links = load_linked_students()
+
+    if links.empty:
+        st.info(
+            "No student is linked to this parent account yet."
+        )
+        return
+
+    labels = []
+    label_to_id = {}
+
+    for i, row in links.iterrows():
+        student_id = str(row["student_user_id"])
+        name = str(row.get("display_name") or "").strip()
+        label = name if name else f"Linked student {len(labels) + 1}"
+        labels.append(label)
+        label_to_id[label] = student_id
+
+    selected_label = st.selectbox(
+        "Student",
+        labels,
+        key="parent_student_selector",
+    )
+    student_id = label_to_id[selected_label]
+
+    assignments = load_student_assignments(
+        student_id,
+        include_done=True,
+    )
+    materials = load_student_study_materials(student_id)
+    reviews = load_student_test_reviews(student_id)
+    activity = load_student_study_activity(student_id)
+
+    today = date.today()
+
+    if assignments.empty:
+        open_df = pd.DataFrame()
+        done_df = pd.DataFrame()
+        upcoming_df = pd.DataFrame()
+        urgent_df = pd.DataFrame()
+    else:
+        open_df = assignments[
+            assignments["status"] != "Done"
+        ].copy()
+        done_df = assignments[
+            assignments["status"] == "Done"
+        ].copy()
+
+        open_df["_due"] = open_df["due_date"].apply(
+            parse_iso_date
+        )
+
+        upcoming_df = open_df[
+            open_df["_due"].notna()
+            & (open_df["_due"] >= today)
+            & (open_df["_due"] <= today + timedelta(days=7))
+        ].copy()
+
+        urgent_df = open_df[
+            open_df["_due"].notna()
+            & (open_df["_due"] <= today + timedelta(days=1))
+        ].copy()
+
+    tests_quizzes = pd.DataFrame()
+    if not open_df.empty:
+        tests_quizzes = open_df[
+            open_df["assignment_type"]
+            .fillna("")
+            .str.lower()
+            .isin(["test", "quiz"])
+        ].copy()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Open", len(open_df))
+    c2.metric("Next 7 days", len(upcoming_df))
+    c3.metric("Completed", len(done_df))
+
+    if not urgent_df.empty:
+        st.markdown("### Needs attention")
+        for _, row in urgent_df.head(5).iterrows():
+            st.markdown(
+                f"**{row.get('class_name') or 'Class'} — "
+                f"{row.get('title') or 'Assignment'}**  \n"
+                f"{parent_due_label(row.get('due_date'))}"
+            )
+    else:
+        st.success(
+            "Nothing is currently overdue or due by tomorrow."
+        )
+
+    if not tests_quizzes.empty:
+        st.markdown("### Upcoming tests & quizzes")
+        tests_quizzes["_due_sort"] = tests_quizzes["due_date"].apply(
+            parse_iso_date
+        )
+        tests_quizzes = tests_quizzes.sort_values(
+            "_due_sort",
+            na_position="last",
+        )
+
+        for _, row in tests_quizzes.head(6).iterrows():
+            st.markdown(
+                f"**{row.get('class_name') or 'Class'} — "
+                f"{row.get('title') or row.get('assignment_type') or 'Assessment'}**  \n"
+                f"{parent_due_label(row.get('due_date'))}"
+            )
+
+    st.markdown("### Recent study activity")
+
+    recent_items = []
+
+    if not materials.empty:
+        for _, row in materials.head(5).iterrows():
+            recent_items.append(
+                (
+                    str(row.get("created_at") or ""),
+                    "Study material",
+                    f"{row.get('class_name') or 'Class'} — "
+                    f"{row.get('topic') or 'Study material'}",
+                )
+            )
+
+    if not reviews.empty:
+        for _, row in reviews.head(5).iterrows():
+            recent_items.append(
+                (
+                    str(row.get("created_at") or ""),
+                    "Test reviewed",
+                    f"{row.get('class_name') or 'Class'} — "
+                    f"{row.get('test_name') or 'Returned test'}",
+                )
+            )
+
+    recent_items.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    if recent_items:
+        for _, activity_type, detail in recent_items[:8]:
+            st.write(f"**{activity_type}:** {detail}")
+    else:
+        st.info("No saved study activity yet.")
+
+    if not reviews.empty:
+        st.markdown("### Returned tests reviewed")
+        for _, row in reviews.head(5).iterrows():
+            score = str(row.get("score_text") or "").strip()
+            line = (
+                f"**{row.get('class_name') or 'Class'} — "
+                f"{row.get('test_name') or 'Returned test'}**"
+            )
+            if score:
+                line += f" • {score}"
+            st.write(line)
+
+    if activity.empty:
+        st.caption(
+            "Detailed session tracking is not turned on yet. "
+            "The dashboard currently reports saved assignments, study materials, "
+            "and returned-test reviews without estimating 'focus time.'"
+        )
 
 
 # -----------------------------
@@ -3687,6 +4006,23 @@ def main() -> None:
         st.session_state["capture_build_version"] = APP_VERSION
 
     render_header()
+
+    role = current_user_role()
+
+    if role == "parent":
+        page = st.radio(
+            "Navigation",
+            ["Parent Dashboard", "Settings"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        if page == "Parent Dashboard":
+            render_parent_dashboard()
+        elif page == "Settings":
+            page_settings()
+
+        return
 
     page = st.radio(
         "Navigation",

@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.1.1-followup-voice-photo"
+APP_VERSION = "Locked In v7.3-review-test"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -695,6 +695,332 @@ def render_tell_locked_in() -> None:
                 st.session_state.pop("voice_transcript", None)
                 st.session_state.pop("voice_operations", None)
                 st.rerun()
+
+
+
+def add_test_review(record: Dict[str, Any]) -> str:
+    supabase = get_supabase()
+    data = {
+        "user_id": require_user_id(),
+        "class_name": record.get("class_name"),
+        "test_name": record.get("test_name"),
+        "test_date": record.get("test_date"),
+        "score_text": record.get("score_text"),
+        "analysis_markdown": record.get("analysis_markdown"),
+        "patterns_json": record.get("patterns_json") or {},
+        "image_path": record.get("image_path"),
+    }
+    res = supabase.table("test_reviews").insert(data).execute()
+    return res.data[0]["id"]
+
+
+def load_test_reviews(class_name: Optional[str] = None) -> pd.DataFrame:
+    supabase = get_supabase()
+    query = (
+        supabase.table("test_reviews")
+        .select("*")
+        .eq("user_id", require_user_id())
+        .order("created_at", desc=True)
+    )
+
+    if class_name:
+        query = query.eq("class_name", class_name)
+
+    res = query.execute()
+    return pd.DataFrame(res.data or [])
+
+
+def test_review_prompt(
+    class_name: str,
+    test_name: str,
+    score_text: str,
+) -> str:
+    return f"""
+You are Locked In, an AI academic coach reviewing a returned test with a student.
+
+CLASS: {class_name or "Unknown"}
+TEST: {test_name or "Returned test"}
+SCORE: {score_text or "Not provided"}
+
+The uploaded image shows a returned test, teacher markings, and/or the
+student's work.
+
+Your goals:
+1. Identify missed or partially correct problems that are clearly visible.
+2. Explain each mistake in student-friendly language.
+3. Classify visible mistakes when appropriate as:
+   - concept misunderstanding
+   - setup/translation error
+   - algebra/arithmetic error
+   - sign error
+   - skipped step
+   - careless/rushed error
+   - unclear handwriting/teacher marking
+4. Preserve uncertainty. Never invent a question or answer that is not readable.
+5. Give a short "What to remember next time" section.
+6. Give 3-5 targeted practice recommendations based only on visible evidence.
+7. Never label the student as "bad" at a subject. Describe specific observed mistakes.
+
+Return markdown with this structure:
+
+# Test Review
+
+## What Went Well
+- ...
+
+## Questions to Review
+### Question / problem
+- What happened:
+- Why it happened:
+- How to avoid it next time:
+
+## Patterns I Noticed
+- ...
+
+## What to Remember Next Time
+1. ...
+2. ...
+3. ...
+
+## Practice Next
+- ...
+
+At the very end include a fenced JSON block:
+
+```json
+{{
+  "patterns": [
+    {{
+      "category": "concept",
+      "observation": "specific observed mistake",
+      "confidence": "high"
+    }}
+  ]
+}}
+```
+
+Allowed categories:
+concept, setup, arithmetic, sign, skipped_step, careless, unclear
+
+Allowed confidence:
+high, medium, low
+
+Use only what is visible in the uploaded test image.
+""".strip()
+
+
+def parse_patterns_from_review(markdown_text: str) -> Dict[str, Any]:
+    matches = re.findall(
+        r"```json\s*(\{.*?\})\s*```",
+        markdown_text,
+        flags=re.DOTALL,
+    )
+
+    if not matches:
+        return {"patterns": []}
+
+    try:
+        return json.loads(matches[-1])
+    except Exception:
+        return {"patterns": []}
+
+
+def build_learning_profile_context(class_name: str) -> str:
+    if not class_name:
+        return ""
+
+    try:
+        reviews = load_test_reviews(class_name=class_name)
+    except Exception:
+        return ""
+
+    if reviews.empty:
+        return ""
+
+    observations = []
+
+    for _, row in reviews.head(5).iterrows():
+        patterns = row.get("patterns_json") or {}
+
+        if isinstance(patterns, str):
+            try:
+                patterns = json.loads(patterns)
+            except Exception:
+                patterns = {}
+
+        for item in patterns.get("patterns", []):
+            obs = str(item.get("observation") or "").strip()
+            if obs:
+                observations.append(obs)
+
+    if not observations:
+        return ""
+
+    bullets = "\n".join(
+        f"- {obs}"
+        for obs in observations[:10]
+    )
+
+    return f"""
+PAST TEST-REVIEW OBSERVATIONS FOR THIS CLASS:
+{bullets}
+
+Use these as gentle reminders only.
+Do not assume a mistake pattern is permanent.
+If the student's current work does not show the same issue, do not force it.
+""".strip()
+
+
+def render_test_review_tool() -> None:
+    st.markdown("### 📄 Review a Test")
+    st.caption(
+        "Take a picture of a returned test. Locked In will explain mistakes, "
+        "identify useful patterns, and remember them for future studying."
+    )
+
+    classes = load_my_classes()
+    class_options = classes if classes else ["Algebra"]
+
+    class_name = st.selectbox(
+        "Class",
+        class_options,
+        key="review_test_class",
+    )
+
+    test_name = st.text_input(
+        "Test name",
+        placeholder="Example: Algebra Unit 1 Test",
+        key="review_test_name",
+    )
+
+    score_text = st.text_input(
+        "Score (optional)",
+        placeholder="Example: 84% or 42/50",
+        key="review_test_score",
+    )
+
+    photo_mode = st.radio(
+        "Add returned test",
+        ["Camera", "Upload"],
+        horizontal=True,
+        key="review_test_photo_mode",
+    )
+
+    test_image = None
+
+    if photo_mode == "Camera":
+        test_image = st.camera_input(
+            "Take a picture of the returned test",
+            key="review_test_camera",
+        )
+    else:
+        test_image = st.file_uploader(
+            "Upload a returned test image",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="review_test_upload",
+        )
+
+    if test_image is not None:
+        display_uploaded_image(
+            test_image,
+            "Returned test",
+        )
+
+        if st.button(
+            "Review this test",
+            type="primary",
+            key="review_test_submit",
+        ):
+            if not ai_is_ready():
+                st.error("AI is not configured.")
+                return
+
+            with st.spinner("Reviewing the test..."):
+                try:
+                    analysis = call_openai_image(
+                        test_review_prompt(
+                            class_name=class_name,
+                            test_name=test_name,
+                            score_text=score_text,
+                        ),
+                        test_image,
+                    )
+
+                    patterns = parse_patterns_from_review(
+                        analysis
+                    )
+
+                    image_path = upload_image_to_storage(
+                        test_image,
+                        folder="test-reviews",
+                    )
+
+                    add_test_review(
+                        {
+                            "class_name": class_name,
+                            "test_name": (
+                                test_name.strip()
+                                or "Returned test"
+                            ),
+                            "test_date": date.today().isoformat(),
+                            "score_text": score_text.strip(),
+                            "analysis_markdown": analysis,
+                            "patterns_json": patterns,
+                            "image_path": image_path,
+                        }
+                    )
+
+                    st.session_state[
+                        "latest_test_review"
+                    ] = analysis
+
+                    st.success(
+                        "Test review saved. Locked In can now use "
+                        "these observations when helping with future work."
+                    )
+
+                except Exception as exc:
+                    st.error(
+                        f"I couldn't review the test: {exc}"
+                    )
+
+    latest = st.session_state.get(
+        "latest_test_review"
+    )
+
+    if latest:
+        st.markdown("#### Latest review")
+        st.markdown(latest)
+
+    reviews = load_test_reviews(
+        class_name=class_name
+    )
+
+    if not reviews.empty:
+        st.markdown("#### Previous reviews")
+
+        for _, row in reviews.head(5).iterrows():
+            label = (
+                row.get("test_name")
+                or "Returned test"
+            )
+
+            with st.expander(str(label)):
+                if row.get("score_text"):
+                    st.caption(
+                        f"Score: {row.get('score_text')}"
+                    )
+
+                if row.get("image_path"):
+                    display_stored_image(
+                        row.get("image_path"),
+                        caption="Returned test",
+                    )
+
+                st.markdown(
+                    row.get("analysis_markdown")
+                    or ""
+                )
 
 
 # -----------------------------
@@ -1862,6 +2188,255 @@ def render_ai_notice() -> None:
 # -----------------------------
 # Pages
 # -----------------------------
+
+def assignment_priority_score(row: pd.Series) -> float:
+    """
+    Simple first-pass recommendation score for Today.
+    Higher score = more urgent / more important.
+    """
+    score = 0.0
+    due = parse_iso_date(row.get("due_date"))
+    today = date.today()
+
+    if due:
+        days = (due - today).days
+        if days < 0:
+            score += 100
+        elif days == 0:
+            score += 80
+        elif days == 1:
+            score += 65
+        elif days <= 3:
+            score += 45
+        elif days <= 7:
+            score += 25
+
+    assignment_type = str(row.get("assignment_type") or "").lower()
+    if assignment_type == "test":
+        score += 30
+    elif assignment_type == "quiz":
+        score += 22
+    elif assignment_type in {"essay", "project"}:
+        score += 18
+
+    priority = str(row.get("priority") or "").lower()
+    if priority == "high":
+        score += 20
+    elif priority == "low":
+        score -= 5
+
+    if row.get("status") == "In progress":
+        score += 12
+
+    return score
+
+
+def choose_recommended_assignment(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        raise ValueError("No assignments available.")
+    scored = df.copy()
+    scored["_locked_in_score"] = scored.apply(
+        assignment_priority_score,
+        axis=1,
+    )
+    scored = scored.sort_values(
+        by=["_locked_in_score", "due_date"],
+        ascending=[False, True],
+        na_position="last",
+    )
+    return scored.iloc[0]
+
+
+def ask_study_helper(
+    assignment: Optional[pd.Series],
+    question: str,
+    mode: str,
+    image: Optional[Any] = None,
+) -> str:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    assignment_context = "No specific assignment selected."
+    learning_profile = ""
+
+    if assignment is not None:
+        assignment_context = (
+            f"Class: {assignment.get('class_name') or 'Unknown'}\\n"
+            f"Assignment: {assignment.get('title') or 'Assignment'}\\n"
+            f"Type: {assignment.get('assignment_type') or 'Assignment'}\\n"
+            f"Due: {assignment.get('due_date') or 'Unknown'}"
+        )
+        learning_profile = build_learning_profile_context(
+            str(assignment.get("class_name") or "")
+        )
+
+    mode_rules = {
+        "Explain / answer a question": (
+            "Answer the student's question clearly. For math, show the steps "
+            "and explain why each step works."
+        ),
+        "Give me a hint": (
+            "Do not give the full answer immediately. Give one useful hint, "
+            "then a next step the student can try."
+        ),
+        "Walk me through it": (
+            "Teach the problem step by step. Ask the student to think through "
+            "key steps when useful, but provide enough guidance to keep moving."
+        ),
+        "Check my work": (
+            "Inspect the student's work carefully. Identify which answers appear "
+            "correct and which appear incorrect. For any incorrect item, explain "
+            "the first point where the work goes wrong and show how to correct it. "
+            "Do not claim you checked something that is not visible."
+        ),
+    }
+
+    prompt = f"""
+You are Locked In, an AI study coach helping a high school student with
+homework right now.
+
+ASSIGNMENT CONTEXT:
+{assignment_context}
+
+{learning_profile}
+
+MODE:
+{mode}
+
+STUDENT QUESTION:
+{question or "The student attached a homework image and wants help."}
+
+INSTRUCTIONS:
+{mode_rules.get(mode, mode_rules["Explain / answer a question"])}
+
+General rules:
+- Use the attached image as the primary source when one is provided.
+- Read the actual problem and the student's visible work carefully.
+- Do not invent numbers, instructions, questions, or answers that are not visible.
+- If part of the image cannot be read, say exactly what is unclear.
+- For algebra/math, preserve the problem exactly and show mathematically valid steps.
+- Keep the response practical and concise enough to use while doing homework.
+""".strip()
+
+    content = [{"type": "input_text", "text": prompt}]
+
+    if image is not None:
+        data_url, _, _ = image_to_data_url(image)
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": data_url,
+            }
+        )
+
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+    )
+    return response.output_text
+
+
+def render_study_question_helper(
+    assignment: Optional[pd.Series],
+    key_prefix: str,
+) -> None:
+    st.markdown("### Ask about homework")
+    st.caption(
+        "Type or record a question, and optionally take a picture of the exact "
+        "problem or your completed work."
+    )
+
+    mode = st.selectbox(
+        "What do you want help with?",
+        [
+            "Explain / answer a question",
+            "Give me a hint",
+            "Walk me through it",
+            "Check my work",
+        ],
+        key=f"{key_prefix}_mode",
+    )
+
+    typed = st.text_area(
+        "Type a question (optional)",
+        placeholder="Example: Why did I get #6 wrong?",
+        key=f"{key_prefix}_typed",
+    )
+
+    voice = st.audio_input(
+        "Or record your question",
+        key=f"{key_prefix}_voice",
+    )
+
+    photo_source = st.radio(
+        "Add a problem or homework picture",
+        ["None", "Camera", "Upload"],
+        horizontal=True,
+        key=f"{key_prefix}_photo_source",
+    )
+
+    image = None
+
+    if photo_source == "Camera":
+        image = st.camera_input(
+            "Take a picture",
+            key=f"{key_prefix}_camera",
+        )
+    elif photo_source == "Upload":
+        image = st.file_uploader(
+            "Upload a homework picture",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_upload",
+        )
+
+    if image is not None:
+        display_uploaded_image(image, "Homework / problem")
+
+    if st.button(
+        "Ask Locked In",
+        type="primary",
+        key=f"{key_prefix}_submit",
+    ):
+        try:
+            question = typed.strip()
+
+            if voice is not None:
+                transcript = transcribe_voice_note(voice)
+                if not question:
+                    question = transcript
+                st.caption(f"I heard: {transcript}")
+
+            if not question and image is None:
+                st.error("Please type/record a question or add a picture.")
+                return
+
+            with st.spinner("Helping with the homework..."):
+                answer = ask_study_helper(
+                    assignment=assignment,
+                    question=question,
+                    mode=mode,
+                    image=image,
+                )
+
+            st.session_state[f"{key_prefix}_last_answer"] = answer
+
+        except Exception as exc:
+            st.error(f"I couldn't help with that yet: {exc}")
+
+    last_answer = st.session_state.get(
+        f"{key_prefix}_last_answer"
+    )
+    if last_answer:
+        st.markdown("#### Locked In")
+        st.markdown(last_answer)
+
+
 def page_today() -> None:
     st.subheader("What should I work on?")
     df = load_assignments(include_done=False)
@@ -1871,30 +2446,59 @@ def page_today() -> None:
             """
             <div class="metric-card">
               <strong>No open assignments yet.</strong><br>
-              <span class="small-muted">Use Add Assignment to enter one manually or from a photo.</span>
+              <span class="small-muted">Use Add to enter an assignment.</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
         return
 
-    st.markdown("### 🔒 Lock In")
-    st.caption("Your best place to start.")
-    first_assignment = df.iloc[0]
-    assignment_card(first_assignment, show_actions=False)
+    recommended = choose_recommended_assignment(df)
+
+    st.markdown("### 🔒 Recommended")
+    st.caption("Locked In's best suggestion based on due date and importance.")
+    assignment_card(recommended, show_actions=False)
+
+    assignment_options = {
+        f"{row.get('class_name') or 'Class'} — {row.get('title') or 'Assignment'}"
+        f" — {due_label(row.get('due_date'), row.get('due_time'))}": str(row["id"])
+        for _, row in df.iterrows()
+    }
+
+    recommended_label = next(
+        (
+            label
+            for label, assignment_id in assignment_options.items()
+            if assignment_id == str(recommended["id"])
+        ),
+        list(assignment_options.keys())[0],
+    )
+
+    st.markdown("#### Choose what you want to work on")
+    chosen_label = st.selectbox(
+        "Assignment",
+        list(assignment_options.keys()),
+        index=list(assignment_options.keys()).index(recommended_label),
+        key="today_lockin_choice",
+        label_visibility="collapsed",
+    )
+
+    chosen_id = assignment_options[chosen_label]
+    chosen_rows = df[df["id"].astype(str) == chosen_id]
+    chosen = chosen_rows.iloc[0]
 
     if st.button(
-        "🔒 Lock In",
-        key=f"lockin_{first_assignment['id']}",
+        f"🔒 Lock In: {chosen.get('class_name') or 'Assignment'}",
+        key=f"lockin_{chosen_id}",
         type="primary",
     ):
         update_assignment_status(
-            first_assignment["id"],
+            chosen["id"],
             "In progress",
         )
         st.session_state[
             "locked_in_assignment_id"
-        ] = first_assignment["id"]
+        ] = chosen["id"]
         st.rerun()
 
     locked_id = st.session_state.get(
@@ -1902,7 +2506,9 @@ def page_today() -> None:
     )
 
     if locked_id:
-        locked_rows = df[df["id"] == locked_id]
+        locked_rows = df[
+            df["id"].astype(str) == str(locked_id)
+        ]
 
         if not locked_rows.empty:
             locked = locked_rows.iloc[0]
@@ -1919,7 +2525,6 @@ def page_today() -> None:
             )
 
             render_locked_in_study_tools(locked)
-
             render_locked_in_followup_chat(locked)
 
             col_done, col_pause = st.columns(2)
@@ -2567,87 +3172,250 @@ def priority_index(value: Optional[str]) -> int:
 
 
 def page_study_tools() -> None:
-    st.subheader("Study Tools")
+    st.subheader("Study")
     render_ai_notice()
 
-    source_type = st.radio("Add material by", ["Photo", "Text"], horizontal=True)
-    class_name = st.text_input("Class", placeholder="Example: Biology")
-    topic = st.text_input("Topic", placeholder="Example: Cell division")
-    output_type = st.selectbox("Create", ["complete study guide", "flashcards and quiz", "clean summary"])
+    homework_tab, review_tab = st.tabs(
+        ["Homework & Study", "📄 Review a Test"]
+    )
 
-    uploaded = None
-    notes_text = ""
+    with homework_tab:
 
-    if source_type == "Photo":
-        capture_mode = st.radio("Photo source", ["Camera", "Upload"], horizontal=True, key="study_photo_source")
-        if capture_mode == "Camera":
-            uploaded = st.camera_input("Take a picture of notes or study guide", key="study_camera")
+        assignments = load_assignments(include_done=False)
+        selected_assignment = None
+
+        if not assignments.empty:
+            options = ["No specific assignment"]
+
+            option_to_id = {}
+
+            for _, row in assignments.iterrows():
+                label = (
+                    f"{row.get('class_name') or 'Class'} — "
+                    f"{row.get('title') or 'Assignment'} — "
+                    f"{due_label(row.get('due_date'), row.get('due_time'))}"
+                )
+                options.append(label)
+                option_to_id[label] = str(row["id"])
+
+            selected_label = st.selectbox(
+                "What are you working on?",
+                options,
+                key="study_assignment_choice",
+            )
+
+            if selected_label != "No specific assignment":
+                assignment_id = option_to_id[selected_label]
+                rows = assignments[
+                    assignments["id"].astype(str) == assignment_id
+                ]
+                if not rows.empty:
+                    selected_assignment = rows.iloc[0]
+
+        render_study_question_helper(
+            assignment=selected_assignment,
+            key_prefix="study_help",
+        )
+
+        st.markdown("---")
+        st.markdown("### Create study material")
+
+        source_type = st.radio(
+            "Add material by",
+            ["Photo", "Text"],
+            horizontal=True,
+            key="study_material_source_type",
+        )
+
+        default_class = (
+            str(selected_assignment.get("class_name") or "")
+            if selected_assignment is not None
+            else ""
+        )
+        default_topic = (
+            str(selected_assignment.get("title") or "")
+            if selected_assignment is not None
+            else ""
+        )
+
+        class_name = st.text_input(
+            "Class",
+            value=default_class,
+            placeholder="Example: Biology",
+            key="study_class_name",
+        )
+        topic = st.text_input(
+            "Topic",
+            value=default_topic,
+            placeholder="Example: Cell division",
+            key="study_topic",
+        )
+
+        output_type = st.selectbox(
+            "Create",
+            [
+                "complete study guide",
+                "flashcards and quiz",
+                "clean summary",
+            ],
+            key="study_output_type",
+        )
+
+        uploaded = None
+        notes_text = ""
+
+        if source_type == "Photo":
+            capture_mode = st.radio(
+                "Photo source",
+                ["Camera", "Upload"],
+                horizontal=True,
+                key="study_photo_source",
+            )
+
+            if capture_mode == "Camera":
+                uploaded = st.camera_input(
+                    "Take a picture of notes, homework, or study guide",
+                    key="study_camera",
+                )
+            else:
+                uploaded = st.file_uploader(
+                    "Upload notes/homework image",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="study_upload",
+                )
+
+            if uploaded is not None:
+                display_uploaded_image(
+                    uploaded,
+                    "Study material",
+                )
         else:
-            uploaded = st.file_uploader("Upload notes image", type=["png", "jpg", "jpeg", "webp"], key="study_upload")
-        if uploaded is not None:
-            display_uploaded_image(uploaded, "Study material")
-    else:
-        notes_text = st.text_area("Paste notes here", height=220)
+            notes_text = st.text_area(
+                "Paste notes here",
+                height=220,
+                key="study_notes_text",
+            )
 
-    if st.button("Generate study help", type="primary"):
-        if not ai_is_ready():
-            st.error("Add OPENAI_API_KEY in Streamlit secrets to generate study tools.")
-            return
-        if source_type == "Photo" and uploaded is None:
-            st.error("Please add a photo first.")
-            return
-        if source_type == "Text" and not notes_text.strip():
-            st.error("Please paste notes first.")
-            return
-
-        with st.spinner("Creating study materials..."):
-            try:
-                image_path = None
-                if source_type == "Photo":
-                    generated = call_openai_image(study_prompt_from_image(output_type), uploaded)
-                    original_text = f"Photo: {getattr(uploaded, 'name', 'camera image')}"
-                    image_path = upload_image_to_storage(uploaded, folder="study")
-                else:
-                    generated = call_openai_text(study_prompt_from_text(notes_text, output_type))
-                    original_text = notes_text
-
-                add_study_material(
-                    {
-                        "class_name": class_name.strip(),
-                        "topic": topic.strip(),
-                        "source_type": source_type,
-                        "original_text": original_text,
-                        "generated_markdown": generated,
-                        "image_path": image_path,
-                    }
+        if st.button(
+            "Generate study help",
+            type="primary",
+            key="study_generate",
+        ):
+            if not ai_is_ready():
+                st.error(
+                    "Add OPENAI_API_KEY in Streamlit secrets "
+                    "to generate study tools."
                 )
-                st.session_state["last_study_output"] = generated
-                st.success("Study material created and saved (with photo if provided).")
-            except Exception as exc:
-                st.error(f"I could not generate study materials: {exc}")
+                return
 
-    if "last_study_output" in st.session_state:
-        st.markdown("### Latest study output")
-        st.markdown(st.session_state["last_study_output"])
+            if source_type == "Photo" and uploaded is None:
+                st.error("Please add a photo first.")
+                return
 
-    st.markdown("### Saved study materials")
-    materials = load_study_materials()
-    if materials.empty:
-        st.info("No saved study materials yet.")
-    else:
-        for _, row in materials.head(10).iterrows():
-            with st.expander(f"{row.get('class_name') or 'Class'} — {row.get('topic') or 'Study material'}"):
-                if row.get("image_path"):
-                    display_stored_image(row.get("image_path"), caption="Original photo")
-                st.markdown(row.get("generated_markdown") or "")
-                st.download_button(
-                    "Download as Markdown",
-                    data=(row.get("generated_markdown") or "").encode("utf-8"),
-                    file_name=f"study_material_{row.get('id')}.md",
-                    mime="text/markdown",
-                    key=f"download_md_{row.get('id')}",
-                )
+            if source_type == "Text" and not notes_text.strip():
+                st.error("Please paste notes first.")
+                return
 
+            with st.spinner("Creating study materials..."):
+                try:
+                    image_path = None
+
+                    if source_type == "Photo":
+                        generated = call_openai_image(
+                            study_prompt_from_image(output_type),
+                            uploaded,
+                        )
+                        original_text = (
+                            f"Photo: "
+                            f"{getattr(uploaded, 'name', 'camera image')}"
+                        )
+                        image_path = upload_image_to_storage(
+                            uploaded,
+                            folder="study",
+                        )
+                    else:
+                        generated = call_openai_text(
+                            study_prompt_from_text(
+                                notes_text,
+                                output_type,
+                            )
+                        )
+                        original_text = notes_text
+
+                    linked_source_type = source_type
+                    if selected_assignment is not None:
+                        linked_source_type = assignment_material_source(
+                            str(selected_assignment["id"]),
+                            source_type.lower(),
+                        )
+
+                    add_study_material(
+                        {
+                            "class_name": class_name.strip(),
+                            "topic": topic.strip(),
+                            "source_type": linked_source_type,
+                            "original_text": original_text,
+                            "generated_markdown": generated,
+                            "image_path": image_path,
+                        }
+                    )
+
+                    st.session_state[
+                        "last_study_output"
+                    ] = generated
+
+                    st.success(
+                        "Study material created and saved."
+                    )
+
+                except Exception as exc:
+                    st.error(
+                        f"I could not generate study materials: {exc}"
+                    )
+
+        if "last_study_output" in st.session_state:
+            st.markdown("### Latest study output")
+            st.markdown(
+                st.session_state["last_study_output"]
+            )
+
+        st.markdown("### Saved study materials")
+        materials = load_study_materials()
+
+        if materials.empty:
+            st.info("No saved study materials yet.")
+        else:
+            for _, row in materials.head(10).iterrows():
+                with st.expander(
+                    f"{row.get('class_name') or 'Class'} — "
+                    f"{row.get('topic') or 'Study material'}"
+                ):
+                    if row.get("image_path"):
+                        display_stored_image(
+                            row.get("image_path"),
+                            caption="Original photo",
+                        )
+
+                    st.markdown(
+                        row.get("generated_markdown") or ""
+                    )
+
+                    st.download_button(
+                        "Download as Markdown",
+                        data=(
+                            row.get("generated_markdown") or ""
+                        ).encode("utf-8"),
+                        file_name=(
+                            f"study_material_{row.get('id')}.md"
+                        ),
+                        mime="text/markdown",
+                        key=f"download_md_{row.get('id')}",
+                    )
+
+
+
+    with review_tab:
+        render_test_review_tool()
 
 def page_calendar() -> None:
     st.subheader("Calendar")

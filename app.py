@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.3-review-test"
+APP_VERSION = "Locked In v7.3.1-high-quality-photos"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -899,32 +899,35 @@ def render_test_review_tool() -> None:
         key="review_test_score",
     )
 
-    photo_mode = st.radio(
-        "Add returned test",
-        ["Camera", "Upload"],
-        horizontal=True,
-        key="review_test_photo_mode",
+    st.info(
+        "For worksheets and returned tests, use **Choose full-quality photo**. "
+        "On iPhone, select the picture from Photos (or use the iPhone camera from "
+        "the file picker). This usually preserves much more detail than the "
+        "browser camera capture."
     )
 
-    test_image = None
-
-    if photo_mode == "Camera":
-        test_image = st.camera_input(
-            "Take a picture of the returned test",
-            key="review_test_camera",
-        )
-    else:
-        test_image = st.file_uploader(
-            "Upload a returned test image",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="review_test_upload",
-        )
+    test_image = st.file_uploader(
+        "Choose full-quality photo",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="review_test_upload_hq",
+    )
 
     if test_image is not None:
         display_uploaded_image(
             test_image,
             "Returned test",
         )
+
+        width, height = uploaded_image_dimensions(test_image)
+        if width and height:
+            st.caption(
+                f"Image received at {width} × {height} pixels."
+            )
+            if max(width, height) < 1600:
+                st.warning(
+                    "This image is fairly small. For handwritten math, choose "
+                    "the original photo from the iPhone Photos library if possible."
+                )
 
         if st.button(
             "Review this test",
@@ -937,7 +940,7 @@ def render_test_review_tool() -> None:
 
             with st.spinner("Reviewing the test..."):
                 try:
-                    analysis = call_openai_image(
+                    analysis = call_openai_image_high_detail(
                         test_review_prompt(
                             class_name=class_name,
                             test_name=test_name,
@@ -1165,6 +1168,49 @@ def call_openai_image(prompt: str, uploaded_file: Any, model: str = DEFAULT_MODE
         ],
     )
     return response.output_text
+
+
+def call_openai_image_high_detail(
+    prompt: str,
+    uploaded_file: Any,
+    model: str = DEFAULT_MODEL,
+) -> str:
+    """
+    Use high-detail vision for worksheets/tests where small handwriting,
+    equations, teacher markings, and problem numbers matter.
+    """
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    data_url, _, _ = image_to_data_url(uploaded_file)
+
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": data_url,
+                        "detail": "high",
+                    },
+                ],
+            }
+        ],
+    )
+    return response.output_text
+
+
+def uploaded_image_dimensions(uploaded_file: Any) -> Tuple[int, int]:
+    try:
+        img = Image.open(io.BytesIO(uploaded_file.getvalue()))
+        img = ImageOps.exif_transpose(img)
+        return img.size
+    except Exception:
+        return (0, 0)
 
 
 
@@ -1996,7 +2042,7 @@ NEW QUESTION:
 
     if extra_image is not None:
         data_url, _, _ = image_to_data_url(extra_image)
-        content.append({"type": "input_image", "image_url": data_url})
+        content.append({"type": "input_image", "image_url": data_url, "detail": "high"})
 
     response = client.responses.create(
         model=DEFAULT_MODEL,
@@ -2327,6 +2373,7 @@ General rules:
             {
                 "type": "input_image",
                 "image_url": data_url,
+                "detail": "high",
             }
         )
 
@@ -2374,9 +2421,13 @@ def render_study_question_helper(
         key=f"{key_prefix}_voice",
     )
 
+    st.caption(
+        "For small equations or handwriting, Upload from Photos gives the best quality."
+    )
+
     photo_source = st.radio(
         "Add a problem or homework picture",
-        ["None", "Camera", "Upload"],
+        ["None", "Upload", "Camera"],
         horizontal=True,
         key=f"{key_prefix}_photo_source",
     )

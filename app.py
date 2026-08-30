@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.1-voice"
+APP_VERSION = "Locked In v7.1.1-followup-voice-photo"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1626,6 +1626,7 @@ def ask_locked_in_followup(
     locked: pd.Series,
     question: str,
     history: List[Dict[str, str]],
+    extra_image: Optional[Any] = None,
 ) -> str:
     client = openai_client()
     if client is None:
@@ -1648,10 +1649,12 @@ and saved study materials below.
 
 Rules:
 - Ground answers in the provided study materials whenever possible.
-- Do not invent facts that are not supported by those materials.
+- If the student has attached a new image, use it as additional context.
+- Do not invent facts that are not supported by the materials or image.
 - If the materials do not contain enough information, say that clearly.
-- You may explain, simplify, quiz, give examples, or help the student reason.
-- Keep answers concise, clear, and student-friendly.
+- If the student is asking about a math or homework problem, walk through the
+  solution step by step in a helpful, student-friendly way.
+- Keep answers concise, clear, and encouraging.
 
 CONTEXT:
 {study_context}
@@ -1663,14 +1666,18 @@ NEW QUESTION:
 {question}
 """.strip()
 
+    content = [{"type": "input_text", "text": prompt}]
+
+    if extra_image is not None:
+        data_url, _, _ = image_to_data_url(extra_image)
+        content.append({"type": "input_image", "image_url": data_url})
+
     response = client.responses.create(
         model=DEFAULT_MODEL,
         input=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt}
-                ],
+                "content": content,
             }
         ],
     )
@@ -1684,7 +1691,6 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
     )
 
     chat_key = f"locked_chat_{locked['id']}"
-
     if chat_key not in st.session_state:
         st.session_state[chat_key] = []
 
@@ -1697,36 +1703,98 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
     else:
         st.info(
             "Try: “Explain this in simpler terms,” “Quiz me on this,” "
-            "or “What should I study first?”"
+            "“How do I solve #4?” or “What should I study first?”"
         )
 
-    question = st.chat_input(
-        "Ask a follow-up question...",
-        key=f"locked_chat_input_{locked['id']}",
-    )
+    with st.container(border=True):
+        st.markdown("#### Ask a question")
 
-    if question:
-        history.append({"role": "user", "content": question})
+        typed_question = st.text_area(
+            "Type your question (optional)",
+            key=f"locked_followup_text_{locked['id']}",
+            placeholder="Example: How do I solve number 4?",
+        )
 
-        with st.chat_message("user"):
-            st.markdown(question)
+        voice_question = st.audio_input(
+            "Or record your question",
+            key=f"locked_followup_audio_{locked['id']}",
+        )
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    answer = ask_locked_in_followup(
-                        locked,
-                        question,
-                        history,
-                    )
-                    st.markdown(answer)
-                    history.append(
-                        {"role": "assistant", "content": answer}
-                    )
-                except Exception as exc:
-                    st.error(f"I couldn't answer that question: {exc}")
+        st.caption("Optional: add another picture of the exact problem.")
+        photo_source = st.radio(
+            "Problem photo",
+            ["None", "Camera", "Upload"],
+            horizontal=True,
+            key=f"locked_followup_photo_source_{locked['id']}",
+        )
 
-        st.session_state[chat_key] = history
+        extra_image = None
+        if photo_source == "Camera":
+            extra_image = st.camera_input(
+                "Take a picture of the problem",
+                key=f"locked_followup_camera_{locked['id']}",
+            )
+        elif photo_source == "Upload":
+            extra_image = st.file_uploader(
+                "Upload a picture of the problem",
+                type=["png", "jpg", "jpeg", "webp"],
+                key=f"locked_followup_upload_{locked['id']}",
+            )
+
+        if extra_image is not None:
+            display_uploaded_image(extra_image, "Problem photo")
+
+        if st.button(
+            "Ask Locked In",
+            type="primary",
+            key=f"locked_followup_submit_{locked['id']}",
+        ):
+            try:
+                question = typed_question.strip()
+
+                if voice_question is not None:
+                    transcribed = transcribe_voice_note(voice_question)
+                    st.session_state[
+                        f"locked_followup_last_transcript_{locked['id']}"
+                    ] = transcribed
+
+                    if not question:
+                        question = transcribed
+
+                if not question:
+                    st.error("Please type or record a question.")
+                else:
+                    history.append({"role": "user", "content": question})
+
+                    with st.chat_message("user"):
+                        st.markdown(question)
+                        if extra_image is not None:
+                            st.caption("Attached a problem photo.")
+
+                    with st.chat_message("assistant"):
+                        with st.spinner("Thinking..."):
+                            answer = ask_locked_in_followup(
+                                locked=locked,
+                                question=question,
+                                history=history,
+                                extra_image=extra_image,
+                            )
+                            st.markdown(answer)
+
+                    history.append({"role": "assistant", "content": answer})
+                    st.session_state[chat_key] = history
+
+                    # Clear the typed question after sending.
+                    st.session_state[f"locked_followup_text_{locked['id']}"] = ""
+
+            except Exception as exc:
+                st.error(f"I couldn't answer that question: {exc}")
+
+    transcript_key = f"locked_followup_last_transcript_{locked['id']}"
+    if st.session_state.get(transcript_key):
+        st.caption(
+            f"Last voice question heard: {st.session_state[transcript_key]}"
+        )
 
 
 # -----------------------------

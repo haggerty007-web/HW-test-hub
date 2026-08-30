@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.3.1-high-quality-photos"
+APP_VERSION = "Locked In v7.3.2-multi-photo-review"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -906,28 +906,32 @@ def render_test_review_tool() -> None:
         "browser camera capture."
     )
 
-    test_image = st.file_uploader(
-        "Choose full-quality photo",
+    test_images = st.file_uploader(
+        "Choose full-quality photo(s)",
         type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
         key="review_test_upload_hq",
     )
 
-    if test_image is not None:
-        display_uploaded_image(
-            test_image,
-            "Returned test",
-        )
+    if test_images:
+        st.caption(f"{len(test_images)} photo(s) selected.")
 
-        width, height = uploaded_image_dimensions(test_image)
-        if width and height:
-            st.caption(
-                f"Image received at {width} × {height} pixels."
+        for i, test_image in enumerate(test_images, start=1):
+            display_uploaded_image(
+                test_image,
+                f"Returned test — page {i}",
             )
-            if max(width, height) < 1600:
-                st.warning(
-                    "This image is fairly small. For handwritten math, choose "
-                    "the original photo from the iPhone Photos library if possible."
+
+            width, height = uploaded_image_dimensions(test_image)
+            if width and height:
+                st.caption(
+                    f"Page {i}: {width} × {height} pixels."
                 )
+                if max(width, height) < 1600:
+                    st.warning(
+                        f"Page {i} is fairly small. For handwritten math, choose "
+                        "the original photo from the iPhone Photos library if possible."
+                    )
 
         if st.button(
             "Review this test",
@@ -940,23 +944,29 @@ def render_test_review_tool() -> None:
 
             with st.spinner("Reviewing the test..."):
                 try:
-                    analysis = call_openai_image_high_detail(
+                    analysis = call_openai_images_high_detail(
                         test_review_prompt(
                             class_name=class_name,
                             test_name=test_name,
                             score_text=score_text,
                         ),
-                        test_image,
+                        test_images,
                     )
 
                     patterns = parse_patterns_from_review(
                         analysis
                     )
 
-                    image_path = upload_image_to_storage(
-                        test_image,
-                        folder="test-reviews",
-                    )
+                    saved_paths = []
+                    for test_image in test_images:
+                        path = upload_image_to_storage(
+                            test_image,
+                            folder="test-reviews",
+                        )
+                        if path:
+                            saved_paths.append(path)
+
+                    image_path = saved_paths[0] if saved_paths else None
 
                     add_test_review(
                         {
@@ -1198,6 +1208,42 @@ def call_openai_image_high_detail(
                         "detail": "high",
                     },
                 ],
+            }
+        ],
+    )
+    return response.output_text
+
+
+def call_openai_images_high_detail(
+    prompt: str,
+    uploaded_files: List[Any],
+    model: str = DEFAULT_MODEL,
+) -> str:
+    """
+    Send multiple homework/test pages to the vision model at high detail.
+    """
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    content = [{"type": "input_text", "text": prompt}]
+
+    for uploaded_file in uploaded_files:
+        data_url, _, _ = image_to_data_url(uploaded_file)
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": data_url,
+                "detail": "high",
+            }
+        )
+
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": content,
             }
         ],
     )

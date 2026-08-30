@@ -21,7 +21,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.3.2-multi-photo-review"
+APP_VERSION = "Locked In v7.3.3-picture-preview-fix"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1102,11 +1102,52 @@ def image_to_data_url(uploaded_file: Any) -> Tuple[str, bytes, str]:
 
 
 def display_uploaded_image(uploaded_file: Any, caption: str = "Uploaded image") -> None:
+    """
+    Show a reliable on-screen preview without changing the original bytes that
+    are later sent to OpenAI or saved to Supabase.
+    """
     try:
-        img = Image.open(io.BytesIO(uploaded_file.getvalue()))
-        st.image(img, caption=caption, use_container_width=True)
-    except Exception:
-        st.info("Image uploaded. Preview is not available for this file type.")
+        raw = uploaded_file.getvalue()
+        img = Image.open(io.BytesIO(raw))
+        img = ImageOps.exif_transpose(img)
+
+        # Convert odd iPhone/browser image modes for display only.
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+
+        # Use a smaller COPY for the preview so a 12–48 MP iPhone image does
+        # not overwhelm Streamlit/the browser. The original full-resolution
+        # upload remains untouched for AI analysis and storage.
+        preview = img.copy()
+        preview.thumbnail((1800, 1800))
+
+        st.image(
+            preview,
+            caption=caption,
+            use_container_width=True,
+        )
+
+        st.caption(
+            f"Original image: {img.width} × {img.height} pixels • "
+            f"Preview only is resized on screen; analysis uses the original."
+        )
+
+    except Exception as exc:
+        # Fall back to letting Streamlit try the raw bytes directly.
+        try:
+            st.image(
+                uploaded_file.getvalue(),
+                caption=caption,
+                use_container_width=True,
+            )
+        except Exception:
+            file_name = getattr(uploaded_file, "name", "image")
+            file_type = getattr(uploaded_file, "type", "unknown type")
+            st.warning(
+                f"{file_name} was uploaded, but Locked In could not preview it "
+                f"({file_type}). If this is an iPhone HEIC photo, save/share it "
+                "as JPEG first, then upload the JPEG."
+            )
 
 
 def strip_code_fence(text: str) -> str:

@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.5-activity-tracking"
+APP_VERSION = "Locked In v7.6-weekly-parent-summary"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1310,6 +1310,32 @@ def render_parent_dashboard() -> None:
     c2.metric("Next 7 days", len(upcoming_df))
     c3.metric("Completed", len(done_df))
 
+    st.markdown("### Weekly summary")
+    st.caption(
+        "A concise parent view of deadlines, study activity, and returned-test reviews."
+    )
+
+    summary_key = f"weekly_parent_summary_{student_id}"
+
+    if st.button(
+        "Generate weekly summary",
+        type="primary",
+        key=f"generate_weekly_summary_{student_id}",
+    ):
+        with st.spinner("Creating weekly summary..."):
+            try:
+                st.session_state[summary_key] = build_weekly_parent_summary(
+                    selected_label,
+                    assignments,
+                    activity,
+                    reviews,
+                )
+            except Exception as exc:
+                st.error(f"I couldn't create the weekly summary: {exc}")
+
+    if st.session_state.get(summary_key):
+        st.markdown(st.session_state[summary_key])
+
     if not urgent_df.empty:
         st.markdown("### Needs attention")
         for _, row in urgent_df.head(5).iterrows():
@@ -1523,6 +1549,140 @@ def parent_activity_label(activity_type: str) -> str:
         activity_type,
         activity_type.replace("_", " ").title(),
     )
+
+
+
+def build_weekly_parent_summary(
+    student_label: str,
+    assignments: pd.DataFrame,
+    activity: pd.DataFrame,
+    reviews: pd.DataFrame,
+) -> str:
+    today = date.today()
+    week_ago = today - timedelta(days=7)
+    next_week = today + timedelta(days=7)
+
+    completed_last_7 = []
+    upcoming = []
+    tests_quizzes = []
+
+    if not assignments.empty:
+        for _, row in assignments.iterrows():
+            status = str(row.get("status") or "")
+            due = parse_iso_date(row.get("due_date"))
+
+            if status == "Done":
+                # We do not currently have a reliable completed_at timestamp,
+                # so we avoid claiming an exact completion date.
+                completed_last_7.append(
+                    {
+                        "class_name": row.get("class_name"),
+                        "title": row.get("title"),
+                    }
+                )
+
+            if due and today <= due <= next_week and status != "Done":
+                item = {
+                    "class_name": row.get("class_name"),
+                    "title": row.get("title"),
+                    "assignment_type": row.get("assignment_type"),
+                    "due_date": due.isoformat(),
+                }
+                upcoming.append(item)
+
+                if str(row.get("assignment_type") or "").lower() in {
+                    "test",
+                    "quiz",
+                }:
+                    tests_quizzes.append(item)
+
+    recent_activity = []
+    if not activity.empty:
+        for _, row in activity.head(20).iterrows():
+            details = row.get("details") or {}
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except Exception:
+                    details = {}
+
+            recent_activity.append(
+                {
+                    "activity_type": row.get("activity_type"),
+                    "duration_seconds": row.get("duration_seconds"),
+                    "details": details,
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+    recent_reviews = []
+    if not reviews.empty:
+        for _, row in reviews.head(5).iterrows():
+            recent_reviews.append(
+                {
+                    "class_name": row.get("class_name"),
+                    "test_name": row.get("test_name"),
+                    "score_text": row.get("score_text"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+    client = openai_client()
+    if client is None:
+        # Useful fallback if AI is unavailable.
+        return (
+            f"**{student_label} — Weekly Summary**\\n\\n"
+            f"- Open assignments due in the next 7 days: {len(upcoming)}\\n"
+            f"- Upcoming tests/quizzes: {len(tests_quizzes)}\\n"
+            f"- Recent Locked In activity events: {len(recent_activity)}\\n"
+            f"- Returned tests reviewed: {len(recent_reviews)}"
+        )
+
+    prompt = f"""
+You are creating a concise weekly parent summary for Locked In, an academic
+executive-function and study-coaching app.
+
+STUDENT: {student_label}
+TODAY: {today.isoformat()}
+
+UPCOMING ASSIGNMENTS, NEXT 7 DAYS:
+{json.dumps(upcoming, default=str)}
+
+UPCOMING TESTS / QUIZZES:
+{json.dumps(tests_quizzes, default=str)}
+
+RECENT IN-APP ACTIVITY:
+{json.dumps(recent_activity, default=str)}
+
+RECENT RETURNED-TEST REVIEWS:
+{json.dumps(recent_reviews, default=str)}
+
+Rules:
+- Keep this to roughly 5-8 short bullets.
+- Be factual and calm.
+- Do not claim the student was "focused" unless that can actually be measured.
+- Lock In duration is app-session duration, not proof of continuous attention.
+- Do not quote or expose the content of the student's homework questions.
+- Mention upcoming deadlines and assessments that deserve attention.
+- Mention meaningful study activity at a high level.
+- Mention returned-test review activity at a high level.
+- Do not characterize the student as lazy, distracted, behind, weak, or bad at a subject.
+- If the data is sparse, say that activity is limited rather than making assumptions.
+- End with one short "This week:" recommendation for the parent.
+""".strip()
+
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt}
+                ],
+            }
+        ],
+    )
+    return response.output_text
 
 
 # -----------------------------
@@ -4243,3 +4403,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    

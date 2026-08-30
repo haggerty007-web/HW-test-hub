@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.4-parent-dashboard"
+APP_VERSION = "Locked In v7.5-activity-tracking"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -684,6 +684,10 @@ def render_tell_locked_in() -> None:
             if st.button("Confirm changes", type="primary"):
                 try:
                     count = apply_voice_operations(operations)
+                    log_study_activity(
+                        "voice_update",
+                        details={"changes_applied": count},
+                    )
                     st.session_state.pop("voice_transcript", None)
                     st.session_state.pop("voice_operations", None)
                     st.success(f"Applied {count} change(s).")
@@ -987,6 +991,16 @@ def render_test_review_tool() -> None:
                     st.session_state[
                         "latest_test_review"
                     ] = analysis
+
+                    log_study_activity(
+                        "test_reviewed",
+                        details={
+                            "class_name": class_name,
+                            "test_name": test_name.strip() or "Returned test",
+                            "score_text": score_text.strip(),
+                            "pages": len(test_images),
+                        },
+                    )
 
                     st.success(
                         "Test review saved. Locked In can now use "
@@ -1328,18 +1342,53 @@ def render_parent_dashboard() -> None:
 
     st.markdown("### Recent study activity")
 
-    recent_items = []
+    if not activity.empty:
+        for _, row in activity.head(10).iterrows():
+            activity_type = str(row.get("activity_type") or "")
+            label = parent_activity_label(activity_type)
+            details = row.get("details") or {}
 
-    if not materials.empty:
-        for _, row in materials.head(5).iterrows():
-            recent_items.append(
-                (
-                    str(row.get("created_at") or ""),
-                    "Study material",
-                    f"{row.get('class_name') or 'Class'} — "
-                    f"{row.get('topic') or 'Study material'}",
-                )
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except Exception:
+                    details = {}
+
+            extras = []
+
+            if details.get("class_name"):
+                extras.append(str(details["class_name"]))
+
+            if details.get("topic"):
+                extras.append(str(details["topic"]))
+
+            if details.get("test_name"):
+                extras.append(str(details["test_name"]))
+
+            duration = row.get("duration_seconds")
+            if duration:
+                try:
+                    minutes = max(
+                        1,
+                        round(float(duration) / 60),
+                    )
+                    extras.append(f"{minutes} min")
+                except Exception:
+                    pass
+
+            suffix = (
+                " • " + " • ".join(extras)
+                if extras
+                else ""
             )
+
+            st.write(f"**{label}**{suffix}")
+
+    else:
+        st.info(
+            "No tracked activity yet. New activity will appear here "
+            "after the student uses Locked In v7.5."
+        )
 
     if not reviews.empty:
         for _, row in reviews.head(5).iterrows():
@@ -1375,12 +1424,105 @@ def render_parent_dashboard() -> None:
                 line += f" • {score}"
             st.write(line)
 
-    if activity.empty:
-        st.caption(
-            "Detailed session tracking is not turned on yet. "
-            "The dashboard currently reports saved assignments, study materials, "
-            "and returned-test reviews without estimating 'focus time.'"
+    st.caption(
+        "Activity reflects actual actions inside Locked In. "
+        "It does not claim that the student was continuously focused."
+    )
+
+
+
+def log_study_activity(
+    activity_type: str,
+    assignment_id: Optional[str] = None,
+    started_at: Optional[str] = None,
+    ended_at: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Record actual in-app activity only. This does not infer attention or focus.
+    Activity logging should never interrupt the student's workflow.
+    """
+    try:
+        payload = {
+            "user_id": require_user_id(),
+            "assignment_id": assignment_id,
+            "activity_type": activity_type,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": duration_seconds,
+            "details": details or {},
+        }
+        res = (
+            get_supabase()
+            .table("study_activity")
+            .insert(payload)
+            .execute()
         )
+        if res.data:
+            return str(res.data[0].get("id") or "")
+    except Exception:
+        return None
+    return None
+
+
+def start_lock_in_tracking(assignment_id: str) -> None:
+    started = datetime.utcnow().isoformat()
+    st.session_state["lock_in_started_at"] = started
+    st.session_state["lock_in_assignment_for_timer"] = assignment_id
+
+    log_study_activity(
+        "lock_in_started",
+        assignment_id=assignment_id,
+        started_at=started,
+    )
+
+
+def finish_lock_in_tracking(
+    assignment_id: str,
+    activity_type: str,
+) -> None:
+    started = st.session_state.get("lock_in_started_at")
+    ended_dt = datetime.utcnow()
+    duration_seconds = None
+
+    if started:
+        try:
+            started_dt = datetime.fromisoformat(started)
+            duration_seconds = max(
+                0,
+                int((ended_dt - started_dt).total_seconds()),
+            )
+        except Exception:
+            duration_seconds = None
+
+    log_study_activity(
+        activity_type,
+        assignment_id=assignment_id,
+        started_at=started,
+        ended_at=ended_dt.isoformat(),
+        duration_seconds=duration_seconds,
+    )
+
+    st.session_state.pop("lock_in_started_at", None)
+    st.session_state.pop("lock_in_assignment_for_timer", None)
+
+
+def parent_activity_label(activity_type: str) -> str:
+    labels = {
+        "lock_in_started": "Started Lock In",
+        "lock_in_completed": "Completed Lock In",
+        "lock_in_paused": "Paused Lock In",
+        "homework_question": "Asked a homework question",
+        "check_my_work": "Checked homework",
+        "study_material_created": "Created study material",
+        "test_reviewed": "Reviewed a returned test",
+        "voice_update": "Updated assignments by voice",
+    }
+    return labels.get(
+        activity_type,
+        activity_type.replace("_", " ").title(),
+    )
 
 
 # -----------------------------
@@ -2543,6 +2685,17 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
                                 history=history,
                                 extra_image=extra_image,
                             )
+                            log_study_activity(
+                                "homework_question",
+                                assignment_id=str(locked["id"]),
+                                details={
+                                    "used_voice": voice_question is not None,
+                                    "used_image": extra_image is not None,
+                                    "class_name": str(
+                                        locked.get("class_name") or ""
+                                    ),
+                                },
+                            )
                             st.markdown(answer)
 
                     history.append({"role": "assistant", "content": answer})
@@ -2867,6 +3020,25 @@ def render_study_question_helper(
                     image=image,
                 )
 
+            log_study_activity(
+                "check_my_work" if mode == "Check my work" else "homework_question",
+                assignment_id=(
+                    str(assignment["id"])
+                    if assignment is not None
+                    else None
+                ),
+                details={
+                    "mode": mode,
+                    "used_voice": voice is not None,
+                    "used_image": image is not None,
+                    "class_name": (
+                        str(assignment.get("class_name") or "")
+                        if assignment is not None
+                        else ""
+                    ),
+                },
+            )
+
             st.session_state[f"{key_prefix}_last_answer"] = answer
 
         except Exception as exc:
@@ -2942,6 +3114,7 @@ def page_today() -> None:
         st.session_state[
             "locked_in_assignment_id"
         ] = chosen["id"]
+        start_lock_in_tracking(str(chosen["id"]))
         st.rerun()
 
     locked_id = st.session_state.get(
@@ -2981,6 +3154,10 @@ def page_today() -> None:
                         locked["id"],
                         "Done",
                     )
+                    finish_lock_in_tracking(
+                        str(locked["id"]),
+                        "lock_in_completed",
+                    )
                     st.session_state.pop(
                         "locked_in_assignment_id",
                         None,
@@ -2992,6 +3169,10 @@ def page_today() -> None:
                     "Pause",
                     key=f"pause_{locked['id']}",
                 ):
+                    finish_lock_in_tracking(
+                        str(locked["id"]),
+                        "lock_in_paused",
+                    )
                     st.session_state.pop(
                         "locked_in_assignment_id",
                         None,
@@ -3806,6 +3987,21 @@ def page_study_tools() -> None:
                     st.session_state[
                         "last_study_output"
                     ] = generated
+
+                    log_study_activity(
+                        "study_material_created",
+                        assignment_id=(
+                            str(selected_assignment["id"])
+                            if selected_assignment is not None
+                            else None
+                        ),
+                        details={
+                            "class_name": class_name.strip(),
+                            "topic": topic.strip(),
+                            "output_type": output_type,
+                            "source_type": source_type,
+                        },
+                    )
 
                     st.success(
                         "Study material created and saved."

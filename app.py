@@ -1,6 +1,7 @@
 import base64
 import calendar
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -21,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.3.4-camera-restore"
+APP_VERSION = "Locked In v7.3.5-1080p-camera"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -1034,6 +1035,33 @@ def render_test_review_tool() -> None:
                     row.get("analysis_markdown")
                     or ""
                 )
+
+
+
+def camera_input_hq(
+    label: str,
+    key: Optional[str] = None,
+) -> Any:
+    """
+    Request the highest Streamlit camera resolution currently supported.
+    Newer Streamlit versions support resolution="1080p". Older deployed
+    versions fall back safely to the original camera_input behavior.
+    """
+    try:
+        params = inspect.signature(st.camera_input).parameters
+        if "resolution" in params:
+            return st.camera_input(
+                label,
+                key=key,
+                resolution="1080p",
+            )
+    except Exception:
+        pass
+
+    return st.camera_input(
+        label,
+        key=key,
+    )
 
 
 # -----------------------------
@@ -2147,7 +2175,7 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
 
         extra_image = None
         if photo_source == "Camera":
-            extra_image = st.camera_input(
+            extra_image = camera_input_hq(
                 "Take a picture of the problem",
                 key=f"locked_followup_camera_{locked['id']}",
             )
@@ -2480,7 +2508,7 @@ def render_study_question_helper(
     image = None
 
     if photo_source == "Camera":
-        image = st.camera_input(
+        image = camera_input_hq(
             "Take a picture",
             key=f"{key_prefix}_camera",
         )
@@ -2747,7 +2775,7 @@ def page_add_assignment() -> None:
         )
 
         if capture_mode == "Camera":
-            uploaded = st.camera_input("Take a picture")
+            uploaded = camera_input_hq("Take a picture")
         else:
             uploaded = st.file_uploader(
                 "Upload image",
@@ -3369,7 +3397,7 @@ def page_study_tools() -> None:
             )
 
             if capture_mode == "Camera":
-                uploaded = st.camera_input(
+                uploaded = camera_input_hq(
                     "Take a picture of notes, homework, or study guide",
                     key="study_camera",
                 )
@@ -3683,4 +3711,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    

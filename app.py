@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.6-weekly-parent-summary"
+APP_VERSION = "Locked In v7.7-planner-onboarding"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -2063,15 +2063,20 @@ def crop_fraction(
     )
 
 
-def planner_structure_prompt() -> str:
-    allowed = json.dumps(PLANNER_SUBJECTS, ensure_ascii=False)
+def planner_structure_prompt(
+    allowed_subjects: Optional[List[str]] = None,
+) -> str:
+    subjects = allowed_subjects or PLANNER_SUBJECTS
+    allowed = json.dumps(subjects, ensure_ascii=False)
 
     return f"""
-Read ONLY the printed weekday dates and the seven class labels from this
-weekly planner. Do not extract assignments.
+Read ONLY the printed weekday dates and the class labels from this weekly
+planner. Do not extract assignments.
 
-Allowed subjects are exactly:
+Allowed subjects/classes are:
 {allowed}
+
+Use ONLY one of those class names for each detected row. Do not invent a class.
 
 Return ONLY valid JSON:
 {{
@@ -2105,7 +2110,10 @@ Rules:
 """.strip()
 
 
-def read_planner_structure(uploaded_file: Any) -> Dict[str, Any]:
+def read_planner_structure(
+    uploaded_file: Any,
+    allowed_subjects: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """
     Read only the printed weekday dates and dynamic subject-row order.
 
@@ -2149,7 +2157,7 @@ def read_planner_structure(uploaded_file: Any) -> Dict[str, Any]:
     }
 
     structure = call_openai_images_structured(
-        planner_structure_prompt(),
+        planner_structure_prompt(allowed_subjects),
         [pil_image_to_jpeg_bytes(img)],
         schema_name="planner_structure",
         schema=schema,
@@ -3214,6 +3222,14 @@ def render_study_question_helper(
 
 def page_today() -> None:
     st.subheader("What should I work on?")
+
+    classes = load_my_classes()
+    if not classes:
+        st.info(
+            "👋 **New to Locked In?** Start in **Settings → My Classes**. "
+            "Add your classes first, then use **Add** to enter assignments by "
+            "voice, Quick Add, or weekly planner photo."
+        )
     df = load_assignments(include_done=False)
 
     if df.empty:
@@ -3457,10 +3473,26 @@ def page_add_assignment() -> None:
             # WEEKLY PLANNER
             # -----------------------------
             if photo_mode == "Weekly planner":
-                st.caption(
-                    "Scan the planner, then tap only the boxes that contain "
-                    "real assignments."
+                st.info(
+                    "### How to scan a weekly planner\n"
+                    "1. Lay the planner flat in good light.\n"
+                    "2. Make sure the full week, dates, class names, and handwriting are visible.\n"
+                    "3. Take one sharp photo of the entire planner.\n"
+                    "4. Tap **Scan planner**.\n"
+                    "5. Check the detected class rows and dates.\n"
+                    "6. Tap only the boxes that actually contain assignments.\n"
+                    "7. Review everything before saving.\n\n"
+                    "**Important:** Locked In should never invent an assignment. "
+                    "If something looks wrong, do not save it."
                 )
+
+                student_classes = load_my_classes()
+
+                if not student_classes:
+                    st.warning(
+                        "Add your classes in **Settings → My Classes** before "
+                        "scanning a planner. This helps prevent invented classes."
+                    )
 
                 if ai_is_ready():
                     if st.button("Scan planner", type="primary"):
@@ -3469,7 +3501,10 @@ def page_add_assignment() -> None:
 
                         with st.spinner("Reading dates and class rows..."):
                             try:
-                                structure = read_planner_structure(uploaded)
+                                structure = read_planner_structure(
+                                    uploaded,
+                                    allowed_subjects=(student_classes or None),
+                                )
                                 st.session_state["planner_structure"] = structure
                                 st.session_state["last_uploaded_file"] = uploaded
                             except Exception as exc:
@@ -3499,15 +3534,23 @@ def page_add_assignment() -> None:
 
                         for row_index in range(7):
                             detected = detected_classes[row_index]
-                            default_index = (
-                                PLANNER_SUBJECTS.index(detected)
-                                if detected in PLANNER_SUBJECTS
-                                else row_index
+                            planner_class_options = (
+                                student_classes
+                                if student_classes
+                                else PLANNER_SUBJECTS
                             )
+
+                            if detected in planner_class_options:
+                                default_index = planner_class_options.index(detected)
+                            else:
+                                default_index = min(
+                                    row_index,
+                                    len(planner_class_options) - 1,
+                                )
 
                             subject = st.selectbox(
                                 f"Row {row_index + 1}",
-                                PLANNER_SUBJECTS,
+                                planner_class_options,
                                 index=default_index,
                                 key=f"planner_subject_row_{row_index}",
                             )
@@ -4286,6 +4329,53 @@ def page_settings() -> None:
     st.subheader("Settings")
     render_ai_notice()
 
+    st.markdown("### New to Locked In?")
+    with st.expander("Start here — 5-minute setup", expanded=False):
+        st.markdown(
+            """
+            **1. Add your classes**
+
+            Go to **Settings → My Classes** and enter the classes you are taking.
+
+            **2. Add schoolwork**
+
+            Use **Add** to:
+            - tell Locked In about assignments by voice,
+            - use Quick Add, or
+            - take a picture of a weekly planner or single assignment.
+
+            **3. Use Today**
+
+            Locked In recommends what to work on, but you can choose any open
+            assignment and tap **Lock In**.
+
+            **4. Get homework help**
+
+            Go to **Study** to ask a question by typing or voice, take/upload a
+            picture of the exact problem, get a hint, walk through it, or use
+            **Check my work**.
+
+            **5. Review a returned test**
+
+            In **Study → Review a Test**, upload photos of a graded test. Locked In
+            will explain mistakes and save useful learning patterns for future study.
+
+            **6. Planner scanning**
+
+            For the best results, use a sharp photo with the whole weekly planner
+            visible. Always review proposed assignments before saving them.
+
+            **What we want testers to tell us**
+            - What felt confusing?
+            - What took too many clicks?
+            - Did Locked In recommend the right thing to work on?
+            - Did voice entry understand you?
+            - Did planner scanning miss or invent anything?
+            - Was homework help actually useful?
+            - What feature did you expect to find but couldn't?
+            """
+        )
+
     st.markdown("### My Classes")
     st.caption(
         "Set up your own classes. These will become the default choices for "
@@ -4403,4 +4493,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    

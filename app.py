@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.9-mastery-flashcards"
+APP_VERSION = "Locked In v7.9.1-mobile-accessibility"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -71,20 +71,73 @@ st.markdown(
         background: #FFFFFF;
         margin-bottom: .7rem;
       }
-      .small-muted { color: #667085; font-size: .9rem; }
+      .small-muted { color: #667085; font-size: 1rem; }
       .due-today { color: #B42318; font-weight: 700; }
       .due-soon { color: #B54708; font-weight: 700; }
       .done { color: #027A48; font-weight: 700; }
-      div[data-testid="stRadio"] label { font-size: .95rem; }
-      .stButton>button {
-        width: 100%;
-        border-radius: 14px;
-        padding: .8rem .9rem;
-        font-weight: 700;
+
+      /* Larger, easier-to-read controls across the app */
+      html, body, [class*="css"] {
+        font-size: 17px;
       }
+      p, li, label, input, textarea {
+        font-size: 1.02rem !important;
+        line-height: 1.45;
+      }
+      h1 { font-size: 2rem !important; }
+      h2 { font-size: 1.65rem !important; }
+      h3 { font-size: 1.35rem !important; }
+
+      div[data-testid="stRadio"] label {
+        font-size: 1.05rem !important;
+        padding-top: .35rem;
+        padding-bottom: .35rem;
+      }
+      div[data-testid="stRadio"] [role="radiogroup"] {
+        gap: .7rem;
+      }
+
+      .stButton>button,
+      div[data-testid="stFormSubmitButton"] button,
+      div[data-testid="stDownloadButton"] button {
+        width: 100%;
+        min-height: 52px;
+        border-radius: 14px;
+        padding: .9rem 1rem;
+        font-size: 1.05rem !important;
+        font-weight: 700;
+        margin-bottom: .35rem;
+      }
+
+      div[data-baseweb="select"] > div {
+        min-height: 50px;
+        font-size: 1.02rem;
+      }
+
       @media (max-width: 640px) {
-        .block-container { padding-left: .9rem; padding-right: .9rem; }
-        .big-title { font-size: 1.8rem; }
+        .block-container {
+          padding-left: 1rem;
+          padding-right: 1rem;
+          padding-bottom: 4rem;
+        }
+        .big-title { font-size: 1.9rem; }
+
+        /* Give mobile controls more breathing room */
+        div[data-testid="stHorizontalBlock"] {
+          gap: .85rem;
+        }
+        div[data-testid="stRadio"] label {
+          min-height: 46px;
+          display: flex;
+          align-items: center;
+        }
+        .stButton>button,
+        div[data-testid="stFormSubmitButton"] button,
+        div[data-testid="stDownloadButton"] button {
+          min-height: 56px;
+          padding: 1rem;
+          font-size: 1.08rem !important;
+        }
       }
     </style>
     """,

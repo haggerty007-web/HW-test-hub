@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.7-planner-onboarding"
+APP_VERSION = "Locked In v7.8-study-first"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -3220,185 +3220,307 @@ def render_study_question_helper(
         st.markdown(last_answer)
 
 
-def page_today() -> None:
-    st.subheader("What should I work on?")
 
-    classes = load_my_classes()
-    if not classes:
-        st.info(
-            "👋 **New to Locked In?** Start in **Settings → My Classes**. "
-            "Add your classes first, then use **Add** to enter assignments by "
-            "voice, Quick Add, or weekly planner photo."
+def generate_flashcards_from_source(
+    source_text: str = "",
+    image: Optional[Any] = None,
+    class_name: str = "",
+) -> List[Dict[str, str]]:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "cards": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "front": {"type": "string"},
+                        "back": {"type": "string"},
+                    },
+                    "required": ["front", "back"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["cards"],
+        "additionalProperties": False,
+    }
+
+    prompt = f"""
+Create 12 to 24 useful study flashcards for a high school student.
+
+CLASS: {class_name or "Not specified"}
+
+SOURCE TEXT:
+{source_text}
+
+Rules:
+- Use only information from the source text and/or attached image.
+- Keep each card focused on one fact, term, concept, or skill.
+- For language vocabulary, put the source-language term on one side and the
+  translation on the other.
+- Avoid duplicate cards.
+- If the source does not support enough cards, make fewer rather than inventing.
+""".strip()
+
+    content = [{"type": "input_text", "text": prompt}]
+    if image is not None:
+        data_url, _, _ = image_to_data_url(image)
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": data_url,
+                "detail": "high",
+            }
         )
-    df = load_assignments(include_done=False)
 
-    if df.empty:
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[{"role": "user", "content": content}],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "locked_in_flashcards",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+
+    result = json.loads(response.output_text)
+    return result.get("cards", [])
+
+
+def render_interactive_flashcards(cards: List[Dict[str, str]], key_prefix: str) -> None:
+    if not cards:
+        st.info("No flashcards yet.")
+        return
+
+    index_key = f"{key_prefix}_index"
+    show_key = f"{key_prefix}_show"
+    missed_key = f"{key_prefix}_missed"
+
+    if index_key not in st.session_state:
+        st.session_state[index_key] = 0
+    if show_key not in st.session_state:
+        st.session_state[show_key] = False
+    if missed_key not in st.session_state:
+        st.session_state[missed_key] = []
+
+    i = min(st.session_state[index_key], len(cards) - 1)
+    card = cards[i]
+
+    st.caption(f"Card {i + 1} of {len(cards)}")
+    st.markdown(
+        f"""
+        <div class="metric-card" style="min-height:180px;display:flex;
+        align-items:center;justify-content:center;text-align:center;">
+          <div style="font-size:1.45rem;font-weight:700;">
+            {card.get('front','')}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state[show_key]:
         st.markdown(
-            """
-            <div class="metric-card">
-              <strong>No open assignments yet.</strong><br>
-              <span class="small-muted">Use Add to enter an assignment.</span>
+            f"""
+            <div class="metric-card" style="text-align:center;">
+              <div style="font-size:1.2rem;">{card.get('back','')}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+    else:
+        if st.button("Show answer", key=f"{key_prefix}_show_btn"):
+            st.session_state[show_key] = True
+            st.rerun()
+
+    if st.session_state[show_key]:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("👍 Got it", key=f"{key_prefix}_got"):
+                st.session_state[index_key] = (i + 1) % len(cards)
+                st.session_state[show_key] = False
+                st.rerun()
+
+        with col2:
+            if st.button("👎 Need practice", key=f"{key_prefix}_miss"):
+                missed = st.session_state[missed_key]
+                if i not in missed:
+                    missed.append(i)
+                st.session_state[missed_key] = missed
+                st.session_state[index_key] = (i + 1) % len(cards)
+                st.session_state[show_key] = False
+                st.rerun()
+
+    missed = st.session_state.get(missed_key, [])
+    if missed:
+        st.caption(f"{len(missed)} card(s) marked for more practice.")
+
+
+def generate_practice_test_from_source(
+    source_text: str = "",
+    image: Optional[Any] = None,
+    class_name: str = "",
+    test_type: str = "Mixed",
+    question_count: int = 15,
+    direction: str = "Standard",
+) -> str:
+    client = openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI API key is not configured.")
+
+    prompt = f"""
+Create a printable practice test for a high school student.
+
+CLASS: {class_name or "Not specified"}
+TEST FORMAT: {test_type}
+NUMBER OF QUESTIONS: {question_count}
+DIRECTION: {direction}
+
+SOURCE TEXT:
+{source_text}
+
+Rules:
+- Use only the supplied text and/or attached image.
+- Match the requested format:
+  * Fill in the blank: leave a clear blank for the student to write.
+  * Multiple choice: exactly four choices per question.
+  * Matching: create clearly labeled terms and choices.
+  * Short answer: leave several blank lines.
+  * Mixed: use an appropriate mix.
+- For language vocabulary, honor the requested direction such as
+  English → Spanish, Spanish → English, or Mixed.
+- Do not include answers beside the questions.
+- After all questions, insert a page-break marker exactly:
+  --- ANSWER KEY ---
+- Then provide a numbered answer key.
+- Make the test clean enough to print directly.
+""".strip()
+
+    content = [{"type": "input_text", "text": prompt}]
+    if image is not None:
+        data_url, _, _ = image_to_data_url(image)
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": data_url,
+                "detail": "high",
+            }
+        )
+
+    response = client.responses.create(
+        model=DEFAULT_MODEL,
+        input=[{"role": "user", "content": content}],
+    )
+    return response.output_text
+
+
+def practice_test_print_html(markdown_text: str, title: str) -> str:
+    safe = (
+        markdown_text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    safe = safe.replace(
+        "--- ANSWER KEY ---",
+        '<div style="page-break-before:always"></div><h2>ANSWER KEY</h2>',
+    )
+    safe = safe.replace("\n", "<br>")
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto;
+       font-size: 16px; line-height: 1.55; }}
+h1 {{ margin-bottom: 24px; }}
+@media print {{ body {{ margin: 0.5in; }} }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+{safe}
+</body>
+</html>"""
+
+
+def page_today() -> None:
+    st.subheader("Home")
+
+    classes = load_my_classes()
+    if not classes:
+        st.info(
+            "👋 **New to Locked In?** Start in **Settings → My Classes**, then "
+            "use **Add** to enter assignments by voice, Quick Add, or planner photo."
+        )
+
+    df = load_assignments(include_done=False)
+
+    st.markdown("## 📚 Ready to study?")
+    st.write(
+        "Go to **Study** whenever you need help. You do not have to select or "
+        "Lock In to an assignment first."
+    )
+
+    if df.empty:
+        st.info("No open assignments yet.")
         return
 
-    recommended = choose_recommended_assignment(df)
-
-    st.markdown("### 🔒 Recommended")
-    st.caption("Locked In's best suggestion based on due date and importance.")
-    assignment_card(recommended, show_actions=False)
-
-    assignment_options = {
-        f"{row.get('class_name') or 'Class'} — {row.get('title') or 'Assignment'}"
-        f" — {due_label(row.get('due_date'), row.get('due_time'))}": str(row["id"])
-        for _, row in df.iterrows()
-    }
-
-    recommended_label = next(
-        (
-            label
-            for label, assignment_id in assignment_options.items()
-            if assignment_id == str(recommended["id"])
-        ),
-        list(assignment_options.keys())[0],
-    )
-
-    st.markdown("#### Choose what you want to work on")
-    chosen_label = st.selectbox(
-        "Assignment",
-        list(assignment_options.keys()),
-        index=list(assignment_options.keys()).index(recommended_label),
-        key="today_lockin_choice",
-        label_visibility="collapsed",
-    )
-
-    chosen_id = assignment_options[chosen_label]
-    chosen_rows = df[df["id"].astype(str) == chosen_id]
-    chosen = chosen_rows.iloc[0]
-
-    if st.button(
-        f"🔒 Lock In: {chosen.get('class_name') or 'Assignment'}",
-        key=f"lockin_{chosen_id}",
-        type="primary",
-    ):
-        update_assignment_status(
-            chosen["id"],
-            "In progress",
-        )
-        st.session_state[
-            "locked_in_assignment_id"
-        ] = chosen["id"]
-        start_lock_in_tracking(str(chosen["id"]))
-        st.rerun()
-
-    locked_id = st.session_state.get(
-        "locked_in_assignment_id"
-    )
-
-    if locked_id:
-        locked_rows = df[
-            df["id"].astype(str) == str(locked_id)
-        ]
-
-        if not locked_rows.empty:
-            locked = locked_rows.iloc[0]
-
-            st.markdown("## 🔒 You're Locked In")
-            st.write(f"**{locked.get('title')}**")
-            st.write(
-                f"{locked.get('class_name') or 'No class'} • "
-                f"{locked.get('assignment_type') or 'Assignment'}"
-            )
-            st.write(
-                f"Estimated time: "
-                f"{locked.get('estimated_effort_minutes') or 30} minutes"
-            )
-
-            render_locked_in_study_tools(locked)
-            render_locked_in_followup_chat(locked)
-
-            col_done, col_pause = st.columns(2)
-
-            with col_done:
-                if st.button(
-                    "✅ I'm Done",
-                    key=f"finish_{locked['id']}",
-                ):
-                    update_assignment_status(
-                        locked["id"],
-                        "Done",
-                    )
-                    finish_lock_in_tracking(
-                        str(locked["id"]),
-                        "lock_in_completed",
-                    )
-                    st.session_state.pop(
-                        "locked_in_assignment_id",
-                        None,
-                    )
-                    st.rerun()
-
-            with col_pause:
-                if st.button(
-                    "Pause",
-                    key=f"pause_{locked['id']}",
-                ):
-                    finish_lock_in_tracking(
-                        str(locked["id"]),
-                        "lock_in_paused",
-                    )
-                    st.session_state.pop(
-                        "locked_in_assignment_id",
-                        None,
-                    )
-                    st.rerun()
-
     today = date.today()
-    df["due_date_parsed"] = df["due_date"].apply(
-        parse_iso_date
-    )
+    df["due_date_parsed"] = df["due_date"].apply(parse_iso_date)
 
     overdue = df[
         df["due_date_parsed"].notna()
         & (df["due_date_parsed"] < today)
     ]
-
-    today_df = df[
-        df["due_date_parsed"] == today
+    due_today = df[df["due_date_parsed"] == today]
+    due_tomorrow = df[
+        df["due_date_parsed"] == today + timedelta(days=1)
     ]
-
-    week_df = df[
+    next_week = df[
         df["due_date_parsed"].notna()
-        & (df["due_date_parsed"] > today)
-        & (
-            df["due_date_parsed"]
-            <= today + timedelta(days=7)
+        & (df["due_date_parsed"] > today + timedelta(days=1))
+        & (df["due_date_parsed"] <= today + timedelta(days=7))
+    ]
+
+    tests_tomorrow = due_tomorrow[
+        due_tomorrow["assignment_type"]
+        .fillna("")
+        .str.lower()
+        .isin(["test", "quiz"])
+    ]
+
+    if not tests_tomorrow.empty:
+        st.warning(
+            f"⚠️ Don't forget: you have {len(tests_tomorrow)} "
+            f"test/quiz item(s) tomorrow."
         )
-    ]
 
-    no_date = df[
-        df["due_date_parsed"].isna()
-    ]
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Overdue", len(overdue))
-    col2.metric("Today", len(today_df))
-    col3.metric("Next 7 days", len(week_df))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Overdue", len(overdue))
+    c2.metric("Due today", len(due_today))
+    c3.metric("Tomorrow", len(due_tomorrow))
 
     sections = [
+        ("Due today", due_today),
+        ("Tomorrow", due_tomorrow),
+        ("Coming up", next_week),
         ("Overdue", overdue),
-        ("Today", today_df),
-        ("Next 7 days", week_df),
-        ("No due date", no_date),
     ]
 
     for label, part in sections:
         if not part.empty:
             st.markdown(f"### {label}")
-
-            for _, row in part.iterrows():
+            for _, row in part.head(8).iterrows():
                 assignment_card(row)
 
 
@@ -4000,264 +4122,265 @@ def priority_index(value: Optional[str]) -> int:
 
 def page_study_tools() -> None:
     st.subheader("Study")
+    st.caption("Start with what you have. No Lock In required.")
     render_ai_notice()
 
-    homework_tab, review_tab = st.tabs(
-        ["Homework & Study", "📄 Review a Test"]
+    help_tab, cards_tab, test_tab, review_tab = st.tabs(
+        [
+            "Ask / Check Work",
+            "🃏 Flashcards",
+            "📝 Practice Test",
+            "📄 Review a Test",
+        ]
     )
 
-    with homework_tab:
+    assignments = load_assignments(include_done=False)
+    selected_assignment = None
 
-        assignments = load_assignments(include_done=False)
-        selected_assignment = None
+    option_to_id = {}
+    options = ["No specific assignment"]
 
-        if not assignments.empty:
-            options = ["No specific assignment"]
-
-            option_to_id = {}
-
-            for _, row in assignments.iterrows():
-                label = (
-                    f"{row.get('class_name') or 'Class'} — "
-                    f"{row.get('title') or 'Assignment'} — "
-                    f"{due_label(row.get('due_date'), row.get('due_time'))}"
-                )
-                options.append(label)
-                option_to_id[label] = str(row["id"])
-
-            selected_label = st.selectbox(
-                "What are you working on?",
-                options,
-                key="study_assignment_choice",
+    if not assignments.empty:
+        for _, row in assignments.iterrows():
+            label = (
+                f"{row.get('class_name') or 'Class'} — "
+                f"{row.get('title') or 'Assignment'} — "
+                f"{due_label(row.get('due_date'), row.get('due_time'))}"
             )
+            options.append(label)
+            option_to_id[label] = str(row["id"])
 
-            if selected_label != "No specific assignment":
-                assignment_id = option_to_id[selected_label]
-                rows = assignments[
-                    assignments["id"].astype(str) == assignment_id
-                ]
-                if not rows.empty:
-                    selected_assignment = rows.iloc[0]
+    with help_tab:
+        selected_label = st.selectbox(
+            "Optional: connect this study session to an assignment",
+            options,
+            key="study_help_assignment",
+        )
+
+        if selected_label != "No specific assignment":
+            assignment_id = option_to_id[selected_label]
+            rows = assignments[
+                assignments["id"].astype(str) == assignment_id
+            ]
+            if not rows.empty:
+                selected_assignment = rows.iloc[0]
 
         render_study_question_helper(
             assignment=selected_assignment,
             key_prefix="study_help",
         )
 
-        st.markdown("---")
-        st.markdown("### Create study material")
+    with cards_tab:
+        st.markdown("### Interactive flashcards")
+        st.caption(
+            "Take/upload a picture of vocabulary, notes, or a study guide—or paste text."
+        )
 
-        source_type = st.radio(
-            "Add material by",
+        card_source = st.radio(
+            "Source",
             ["Photo", "Text"],
             horizontal=True,
-            key="study_material_source_type",
+            key="cards_source",
         )
-
-        default_class = (
-            str(selected_assignment.get("class_name") or "")
-            if selected_assignment is not None
-            else ""
-        )
-        default_topic = (
-            str(selected_assignment.get("title") or "")
-            if selected_assignment is not None
-            else ""
-        )
-
-        class_name = st.text_input(
+        card_class = st.text_input(
             "Class",
-            value=default_class,
-            placeholder="Example: Biology",
-            key="study_class_name",
-        )
-        topic = st.text_input(
-            "Topic",
-            value=default_topic,
-            placeholder="Example: Cell division",
-            key="study_topic",
+            placeholder="Example: Spanish",
+            key="cards_class",
         )
 
-        output_type = st.selectbox(
-            "Create",
-            [
-                "complete study guide",
-                "flashcards and quiz",
-                "clean summary",
-            ],
-            key="study_output_type",
-        )
+        card_image = None
+        card_text = ""
 
-        uploaded = None
-        notes_text = ""
-
-        if source_type == "Photo":
-            capture_mode = st.radio(
+        if card_source == "Photo":
+            card_photo_mode = st.radio(
                 "Photo source",
                 ["Camera", "Upload"],
                 horizontal=True,
-                key="study_photo_source",
+                key="cards_photo_mode",
             )
-
-            if capture_mode == "Camera":
-                uploaded = camera_input_hq(
-                    "Take a picture of notes, homework, or study guide",
-                    key="study_camera",
+            if card_photo_mode == "Camera":
+                card_image = camera_input_hq(
+                    "Take a picture of what you need to study",
+                    key="cards_camera",
                 )
             else:
-                uploaded = st.file_uploader(
-                    "Upload notes/homework image",
+                card_image = st.file_uploader(
+                    "Upload a study image",
                     type=["png", "jpg", "jpeg", "webp"],
-                    key="study_upload",
+                    key="cards_upload",
                 )
-
-            if uploaded is not None:
-                display_uploaded_image(
-                    uploaded,
-                    "Study material",
-                )
+            if card_image is not None:
+                display_uploaded_image(card_image, "Flashcard source")
         else:
-            notes_text = st.text_area(
-                "Paste notes here",
-                height=220,
-                key="study_notes_text",
+            card_text = st.text_area(
+                "Paste vocabulary or notes",
+                height=200,
+                key="cards_text",
             )
 
         if st.button(
-            "Generate study help",
+            "Create flashcards",
             type="primary",
-            key="study_generate",
+            key="cards_generate",
         ):
-            if not ai_is_ready():
-                st.error(
-                    "Add OPENAI_API_KEY in Streamlit secrets "
-                    "to generate study tools."
-                )
-                return
-
-            if source_type == "Photo" and uploaded is None:
-                st.error("Please add a photo first.")
-                return
-
-            if source_type == "Text" and not notes_text.strip():
-                st.error("Please paste notes first.")
-                return
-
-            with st.spinner("Creating study materials..."):
-                try:
-                    image_path = None
-
-                    if source_type == "Photo":
-                        generated = call_openai_image(
-                            study_prompt_from_image(output_type),
-                            uploaded,
+            if card_image is None and not card_text.strip():
+                st.error("Add a photo or some text first.")
+            else:
+                with st.spinner("Building flashcards..."):
+                    try:
+                        cards = generate_flashcards_from_source(
+                            source_text=card_text,
+                            image=card_image,
+                            class_name=card_class,
                         )
-                        original_text = (
-                            f"Photo: "
-                            f"{getattr(uploaded, 'name', 'camera image')}"
-                        )
-                        image_path = upload_image_to_storage(
-                            uploaded,
-                            folder="study",
-                        )
-                    else:
-                        generated = call_openai_text(
-                            study_prompt_from_text(
-                                notes_text,
-                                output_type,
-                            )
-                        )
-                        original_text = notes_text
+                        st.session_state["study_first_cards"] = cards
+                        st.session_state["study_first_cards_index"] = 0
+                        st.session_state["study_first_cards_show"] = False
+                        st.session_state["study_first_cards_missed"] = []
+                    except Exception as exc:
+                        st.error(f"I couldn't create flashcards: {exc}")
 
-                    linked_source_type = source_type
-                    if selected_assignment is not None:
-                        linked_source_type = assignment_material_source(
-                            str(selected_assignment["id"]),
-                            source_type.lower(),
-                        )
-
-                    add_study_material(
-                        {
-                            "class_name": class_name.strip(),
-                            "topic": topic.strip(),
-                            "source_type": linked_source_type,
-                            "original_text": original_text,
-                            "generated_markdown": generated,
-                            "image_path": image_path,
-                        }
-                    )
-
-                    st.session_state[
-                        "last_study_output"
-                    ] = generated
-
-                    log_study_activity(
-                        "study_material_created",
-                        assignment_id=(
-                            str(selected_assignment["id"])
-                            if selected_assignment is not None
-                            else None
-                        ),
-                        details={
-                            "class_name": class_name.strip(),
-                            "topic": topic.strip(),
-                            "output_type": output_type,
-                            "source_type": source_type,
-                        },
-                    )
-
-                    st.success(
-                        "Study material created and saved."
-                    )
-
-                except Exception as exc:
-                    st.error(
-                        f"I could not generate study materials: {exc}"
-                    )
-
-        if "last_study_output" in st.session_state:
-            st.markdown("### Latest study output")
-            st.markdown(
-                st.session_state["last_study_output"]
+        cards = st.session_state.get("study_first_cards", [])
+        if cards:
+            render_interactive_flashcards(
+                cards,
+                key_prefix="study_first_cards",
             )
 
-        st.markdown("### Saved study materials")
-        materials = load_study_materials()
+    with test_tab:
+        st.markdown("### Practice test")
+        st.caption(
+            "Create a test that matches how the teacher is likely to test the material."
+        )
 
-        if materials.empty:
-            st.info("No saved study materials yet.")
+        test_source = st.radio(
+            "Source",
+            ["Photo", "Text"],
+            horizontal=True,
+            key="ptest_source",
+        )
+
+        test_class = st.text_input(
+            "Class",
+            placeholder="Example: Spanish",
+            key="ptest_class",
+        )
+
+        test_format = st.selectbox(
+            "Test format",
+            [
+                "Fill in the blank",
+                "Multiple choice",
+                "Matching",
+                "Short answer",
+                "Mixed",
+            ],
+            key="ptest_format",
+        )
+
+        direction = st.selectbox(
+            "Direction",
+            [
+                "Standard",
+                "English → Spanish",
+                "Spanish → English",
+                "Mixed directions",
+            ],
+            key="ptest_direction",
+        )
+
+        question_count = st.select_slider(
+            "Number of questions",
+            options=[10, 15, 20, 25, 30],
+            value=15,
+            key="ptest_count",
+        )
+
+        test_image = None
+        test_text = ""
+
+        if test_source == "Photo":
+            ptest_photo_mode = st.radio(
+                "Photo source",
+                ["Camera", "Upload"],
+                horizontal=True,
+                key="ptest_photo_mode",
+            )
+            if ptest_photo_mode == "Camera":
+                test_image = camera_input_hq(
+                    "Take a picture of the worksheet, vocabulary, or notes",
+                    key="ptest_camera",
+                )
+            else:
+                test_image = st.file_uploader(
+                    "Upload a study image",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="ptest_upload",
+                )
+            if test_image is not None:
+                display_uploaded_image(test_image, "Practice test source")
         else:
-            for _, row in materials.head(10).iterrows():
-                with st.expander(
-                    f"{row.get('class_name') or 'Class'} — "
-                    f"{row.get('topic') or 'Study material'}"
-                ):
-                    if row.get("image_path"):
-                        display_stored_image(
-                            row.get("image_path"),
-                            caption="Original photo",
+            test_text = st.text_area(
+                "Paste vocabulary or notes",
+                height=200,
+                key="ptest_text",
+            )
+
+        if st.button(
+            "Create practice test",
+            type="primary",
+            key="ptest_generate",
+        ):
+            if test_image is None and not test_text.strip():
+                st.error("Add a photo or some text first.")
+            else:
+                with st.spinner("Creating practice test..."):
+                    try:
+                        generated_test = generate_practice_test_from_source(
+                            source_text=test_text,
+                            image=test_image,
+                            class_name=test_class,
+                            test_type=test_format,
+                            question_count=question_count,
+                            direction=direction,
+                        )
+                        st.session_state[
+                            "study_first_practice_test"
+                        ] = generated_test
+                    except Exception as exc:
+                        st.error(
+                            f"I couldn't create the practice test: {exc}"
                         )
 
-                    st.markdown(
-                        row.get("generated_markdown") or ""
-                    )
+        generated_test = st.session_state.get(
+            "study_first_practice_test"
+        )
+        if generated_test:
+            st.markdown(generated_test)
 
-                    st.download_button(
-                        "Download as Markdown",
-                        data=(
-                            row.get("generated_markdown") or ""
-                        ).encode("utf-8"),
-                        file_name=(
-                            f"study_material_{row.get('id')}.md"
-                        ),
-                        mime="text/markdown",
-                        key=f"download_md_{row.get('id')}",
-                    )
-
-
+            print_title = (
+                f"{test_class or 'Locked In'} Practice Test"
+            )
+            html = practice_test_print_html(
+                generated_test,
+                print_title,
+            )
+            st.download_button(
+                "🖨️ Download printable test",
+                data=html.encode("utf-8"),
+                file_name="locked_in_practice_test.html",
+                mime="text/html",
+                key="ptest_download",
+            )
+            st.caption(
+                "Open the downloaded file in a browser and choose Print. "
+                "The answer key starts on a new printed page."
+            )
 
     with review_tab:
         render_test_review_tool()
+
+
 
 def page_calendar() -> None:
     st.subheader("Calendar")
@@ -4344,14 +4467,14 @@ def page_settings() -> None:
             - use Quick Add, or
             - take a picture of a weekly planner or single assignment.
 
-            **3. Use Today**
+            **3. Study anything**
 
-            Locked In recommends what to work on, but you can choose any open
-            assignment and tap **Lock In**.
+            Go straight to **Study** whenever you need help. You do not have to
+            choose or Lock In to an assignment first.
 
             **4. Get homework help**
 
-            Go to **Study** to ask a question by typing or voice, take/upload a
+            In **Study**, ask a question by typing or voice, take/upload a
             picture of the exact problem, get a hint, walk through it, or use
             **Check my work**.
 
@@ -4472,17 +4595,17 @@ def main() -> None:
 
     page = st.radio(
         "Navigation",
-        ["Today", "Add", "Study", "Calendar", "All", "Settings"],
+        ["Study", "Home", "Add", "Calendar", "All", "Settings"],
         horizontal=True,
         label_visibility="collapsed",
     )
 
-    if page == "Today":
+    if page == "Study":
+        page_study_tools()
+    elif page == "Home":
         page_today()
     elif page == "Add":
         page_add_assignment()
-    elif page == "Study":
-        page_study_tools()
     elif page == "Calendar":
         page_calendar()
     elif page == "All":

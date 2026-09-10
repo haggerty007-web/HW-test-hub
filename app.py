@@ -22,7 +22,7 @@ except Exception:
     OpenAI = None
 
 APP_NAME = "Locked In"
-APP_VERSION = "Locked In v7.8-study-first"
+APP_VERSION = "Locked In v7.9-mastery-flashcards"
 DEFAULT_MODEL = "gpt-5.6-sol"
 PLANNER_MODEL = "gpt-5.6-terra"
 BUCKET_NAME = "homework-docs"
@@ -3225,7 +3225,7 @@ def generate_flashcards_from_source(
     source_text: str = "",
     image: Optional[Any] = None,
     class_name: str = "",
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     client = openai_client()
     if client is None:
         raise RuntimeError("OpenAI API key is not configured.")
@@ -3238,10 +3238,20 @@ def generate_flashcards_from_source(
                 "items": {
                     "type": "object",
                     "properties": {
-                        "front": {"type": "string"},
-                        "back": {"type": "string"},
+                        "question": {"type": "string"},
+                        "correct_answer": {"type": "string"},
+                        "wrong_answers": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                        },
                     },
-                    "required": ["front", "back"],
+                    "required": [
+                        "question",
+                        "correct_answer",
+                        "wrong_answers",
+                    ],
                     "additionalProperties": False,
                 },
             }
@@ -3251,20 +3261,27 @@ def generate_flashcards_from_source(
     }
 
     prompt = f"""
-Create 12 to 24 useful study flashcards for a high school student.
+Create 10 to 20 multiple-choice mastery flashcards for a high school student.
 
 CLASS: {class_name or "Not specified"}
 
 SOURCE TEXT:
 {source_text}
 
+Each card must contain:
+- one clear question or prompt,
+- one correct answer,
+- exactly two plausible but incorrect answers.
+
 Rules:
 - Use only information from the source text and/or attached image.
-- Keep each card focused on one fact, term, concept, or skill.
-- For language vocabulary, put the source-language term on one side and the
-  translation on the other.
-- Avoid duplicate cards.
-- If the source does not support enough cards, make fewer rather than inventing.
+- Wrong answers must be believable enough to make the student think.
+- Do not create trick questions.
+- Avoid duplicates.
+- For language vocabulary, the prompt may be a word in one language and the
+  choices should contain the correct translation plus two plausible distractors.
+- If the source supports fewer than 10 quality cards, create fewer rather than
+  inventing content.
 """.strip()
 
     content = [{"type": "input_text", "text": prompt}]
@@ -3284,7 +3301,7 @@ Rules:
         text={
             "format": {
                 "type": "json_schema",
-                "name": "locked_in_flashcards",
+                "name": "locked_in_mastery_flashcards",
                 "strict": True,
                 "schema": schema,
             }
@@ -3294,76 +3311,128 @@ Rules:
     result = json.loads(response.output_text)
     return result.get("cards", [])
 
+def render_interactive_flashcards(
+    cards: List[Dict[str, Any]],
+    key_prefix: str,
+) -> None:
+    import random
 
-def render_interactive_flashcards(cards: List[Dict[str, str]], key_prefix: str) -> None:
     if not cards:
         st.info("No flashcards yet.")
         return
 
-    index_key = f"{key_prefix}_index"
-    show_key = f"{key_prefix}_show"
-    missed_key = f"{key_prefix}_missed"
+    queue_key = f"{key_prefix}_queue"
+    correct_key = f"{key_prefix}_correct_once"
+    total_key = f"{key_prefix}_total_attempts"
+    feedback_key = f"{key_prefix}_feedback"
+    options_key = f"{key_prefix}_options"
 
-    if index_key not in st.session_state:
-        st.session_state[index_key] = 0
-    if show_key not in st.session_state:
-        st.session_state[show_key] = False
-    if missed_key not in st.session_state:
-        st.session_state[missed_key] = []
+    if queue_key not in st.session_state:
+        st.session_state[queue_key] = list(range(len(cards)))
+    if correct_key not in st.session_state:
+        st.session_state[correct_key] = set()
+    if total_key not in st.session_state:
+        st.session_state[total_key] = 0
 
-    i = min(st.session_state[index_key], len(cards) - 1)
-    card = cards[i]
+    queue = st.session_state[queue_key]
+    mastered = st.session_state[correct_key]
 
-    st.caption(f"Card {i + 1} of {len(cards)}")
+    if not queue:
+        st.success(
+            f"🎉 You got all {len(cards)} cards correct. "
+            "You've completed this set!"
+        )
+        st.progress(1.0)
+        if st.button("Practice the set again", key=f"{key_prefix}_restart"):
+            st.session_state[queue_key] = list(range(len(cards)))
+            st.session_state[correct_key] = set()
+            st.session_state[total_key] = 0
+            st.session_state.pop(feedback_key, None)
+            st.session_state.pop(options_key, None)
+            st.rerun()
+        return
+
+    current_index = queue[0]
+    card = cards[current_index]
+
+    st.progress(len(mastered) / len(cards))
+    st.caption(
+        f"Mastered {len(mastered)} of {len(cards)} • "
+        f"{len(queue)} card(s) still in rotation"
+    )
+
     st.markdown(
         f"""
-        <div class="metric-card" style="min-height:180px;display:flex;
+        <div class="metric-card" style="min-height:150px;display:flex;
         align-items:center;justify-content:center;text-align:center;">
-          <div style="font-size:1.45rem;font-weight:700;">
-            {card.get('front','')}
+          <div style="font-size:1.4rem;font-weight:700;">
+            {card.get('question','')}
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if st.session_state[show_key]:
-        st.markdown(
-            f"""
-            <div class="metric-card" style="text-align:center;">
-              <div style="font-size:1.2rem;">{card.get('back','')}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        if st.button("Show answer", key=f"{key_prefix}_show_btn"):
-            st.session_state[show_key] = True
-            st.rerun()
+    # Shuffle answer order once per displayed card.
+    option_state_key = f"{options_key}_{current_index}_{st.session_state[total_key]}"
+    if option_state_key not in st.session_state:
+        choices = [
+            card.get("correct_answer", ""),
+            *card.get("wrong_answers", []),
+        ]
+        random.shuffle(choices)
+        st.session_state[option_state_key] = choices
 
-    if st.session_state[show_key]:
-        col1, col2 = st.columns(2)
+    choices = st.session_state[option_state_key]
 
-        with col1:
-            if st.button("👍 Got it", key=f"{key_prefix}_got"):
-                st.session_state[index_key] = (i + 1) % len(cards)
-                st.session_state[show_key] = False
-                st.rerun()
+    answer = st.radio(
+        "Choose the best answer",
+        choices,
+        index=None,
+        key=f"{key_prefix}_answer_{current_index}_{st.session_state[total_key]}",
+    )
 
-        with col2:
-            if st.button("👎 Need practice", key=f"{key_prefix}_miss"):
-                missed = st.session_state[missed_key]
-                if i not in missed:
-                    missed.append(i)
-                st.session_state[missed_key] = missed
-                st.session_state[index_key] = (i + 1) % len(cards)
-                st.session_state[show_key] = False
-                st.rerun()
+    if st.button(
+        "Check answer",
+        type="primary",
+        key=f"{key_prefix}_check_{current_index}_{st.session_state[total_key]}",
+    ):
+        if answer is None:
+            st.warning("Choose an answer first.")
+            return
 
-    missed = st.session_state.get(missed_key, [])
-    if missed:
-        st.caption(f"{len(missed)} card(s) marked for more practice.")
+        st.session_state[total_key] += 1
 
+        if answer == card.get("correct_answer"):
+            mastered.add(current_index)
+            st.session_state[correct_key] = mastered
+            st.session_state[queue_key] = queue[1:]
+            st.session_state[feedback_key] = (
+                "correct",
+                f"✅ Correct — {card.get('correct_answer','')}",
+            )
+        else:
+            # Move a missed card later in the rotation instead of dropping it.
+            remaining = queue[1:]
+            insert_at = min(2, len(remaining))
+            remaining.insert(insert_at, current_index)
+            st.session_state[queue_key] = remaining
+            st.session_state[feedback_key] = (
+                "wrong",
+                f"❌ Not quite. The correct answer is "
+                f"**{card.get('correct_answer','')}**. "
+                "You'll see this one again.",
+            )
+
+        st.rerun()
+
+    feedback = st.session_state.pop(feedback_key, None)
+    if feedback:
+        kind, message = feedback
+        if kind == "correct":
+            st.success(message)
+        else:
+            st.error(message)
 
 def generate_practice_test_from_source(
     source_text: str = "",
@@ -4171,9 +4240,9 @@ def page_study_tools() -> None:
         )
 
     with cards_tab:
-        st.markdown("### Interactive flashcards")
+        st.markdown("### Mastery flashcards")
         st.caption(
-            "Take/upload a picture of vocabulary, notes, or a study guide—or paste text."
+            "Choose from 3 answers. Missed cards come back until you get every card right."
         )
 
         card_source = st.radio(
@@ -4219,7 +4288,7 @@ def page_study_tools() -> None:
             )
 
         if st.button(
-            "Create flashcards",
+            "Create mastery set",
             type="primary",
             key="cards_generate",
         ):
@@ -4234,9 +4303,15 @@ def page_study_tools() -> None:
                             class_name=card_class,
                         )
                         st.session_state["study_first_cards"] = cards
-                        st.session_state["study_first_cards_index"] = 0
-                        st.session_state["study_first_cards_show"] = False
-                        st.session_state["study_first_cards_missed"] = []
+                        st.session_state["study_first_cards_queue"] = list(
+                            range(len(cards))
+                        )
+                        st.session_state["study_first_cards_correct_once"] = set()
+                        st.session_state["study_first_cards_total_attempts"] = 0
+                        st.session_state.pop(
+                            "study_first_cards_feedback",
+                            None,
+                        )
                     except Exception as exc:
                         st.error(f"I couldn't create flashcards: {exc}")
 

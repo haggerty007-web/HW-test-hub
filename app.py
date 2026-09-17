@@ -864,6 +864,13 @@ Allowed confidence:
 high, medium, low
 
 Use only what is visible in the uploaded test image.
+
+When a problem involves algebra or other math:
+- Restate the original problem in test-ready LaTeX.
+- Rewrite the student's visible work in LaTeX.
+- Write the corrected solution in LaTeX.
+- Use the same notation on every problem. Do not mix spoken symbols and formulas.
+{MATH_OUTPUT_RULES}
 """.strip()
 
 
@@ -1071,7 +1078,7 @@ def render_test_review_tool() -> None:
 
     if latest:
         st.markdown("#### Latest review")
-        st.markdown(latest)
+        render_math_markdown(latest)
 
     reviews = load_test_reviews(
         class_name=class_name
@@ -1098,7 +1105,7 @@ def render_test_review_tool() -> None:
                         caption="Returned test",
                     )
 
-                st.markdown(
+                render_math_markdown(
                     row.get("analysis_markdown")
                     or ""
                 )
@@ -2826,6 +2833,7 @@ Rules:
 - If the student is asking about a math or homework problem, walk through the
   solution step by step in a helpful, student-friendly way.
 - Keep answers concise, clear, and encouraging.
+- Write all math in LaTeX, the way it appears on a test. Never describe symbols in words.
 
 CONTEXT:
 {study_context}
@@ -2870,7 +2878,7 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
     if history:
         for message in history:
             with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+                render_math_markdown(message["content"])
     else:
         st.info(
             "Try: “Explain this in simpler terms,” “Quiz me on this,” "
@@ -2961,7 +2969,7 @@ def render_locked_in_followup_chat(locked: pd.Series) -> None:
                                     ),
                                 },
                             )
-                            st.markdown(answer)
+                            render_math_markdown(answer)
 
                     history.append({"role": "assistant", "content": answer})
                     st.session_state[chat_key] = history
@@ -3173,6 +3181,10 @@ General rules:
 - If part of the image cannot be read, say exactly what is unclear.
 - For algebra/math, preserve the problem exactly and show mathematically valid steps.
 - Keep the response practical and concise enough to use while doing homework.
+- Write every equation, fraction, exponent, and root in LaTeX.
+- Restate the visible problem in LaTeX before explaining it.
+- If checking work, show the student's step and the corrected step in LaTeX.
+{MATH_OUTPUT_RULES}
 """.strip()
 
     content = [{"type": "input_text", "text": prompt}]
@@ -3314,7 +3326,7 @@ def render_study_question_helper(
     )
     if last_answer:
         st.markdown("#### Locked In")
-        st.markdown(last_answer)
+        render_math_markdown(last_answer)
 
 
 

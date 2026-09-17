@@ -2429,34 +2429,95 @@ Rules:
 
 
 MATH_OUTPUT_RULES = """
-MATH AND SCIENCE NOTATION RULES:
-Write math the way it appears on an 11th-grade test.
+MATH NOTATION RULES — REQUIRED:
+Write math exactly as it appears on an 11th-grade worksheet.
 
-Use LaTeX only. Never describe symbols in words.
-Never write: open parenthesis, close parenthesis, slash, right slash,
-left slash, frac, over, squared, cubed, or "the fraction".
+Allowed:
+- $4x-13>7$
+- $\\dfrac{2x+1}{x-5}$
+- $x^2+3x-4=0$
+- $-3 \\le x < 5$
 
-Use:
-- Inline math: $x^2+3x-4$
-- Fractions: $\\dfrac{2x+1}{x-5}$
-- Equations: $3(x-2)=4x+1$
-- Roots: $\\sqrt{x+1}$
-- Exponents: $2^{x+1}$
+Forbidden:
+- Do not write begin, end, align, gather, equation, frac, dfrac,
+  open parenthesis, close parenthesis, left, right, slash,
+  forward slash, print, text, or AND.
+- Do not use \\begin{align}, \\begin{equation}, \\left, \\right.
+- Do not say "greater than" or "AND" for inequalities.
+  Write $x>4$, $x\\ge 4$, or $-3 \\le x < 5$.
+- One short equation per line. No LaTeX environments.
 
-Practice problems must look like a worksheet:
+Good:
+Solve: $4x-13>7$
 
-1. Solve: $\\dfrac{x+3}{2}=5$
-2. Simplify: $(2x-1)(x+4)$
-
-Keep numbers, variables, and operations inside $...$.
-If the source is algebra, match that topic and difficulty.
+Bad:
+begin align 4x minus 13 AND 7 end align
 """
+
+
+def cleanup_math_text(text: str) -> str:
+    """Strip spoken LaTeX junk so the student sees normal worksheet math."""
+    if not text:
+        return ""
+
+    cleaned = str(text)
+
+    cleaned = re.sub(r"\\begin\{align\*?\}", "$$", cleaned)
+    cleaned = re.sub(r"\\end\{align\*?\}", "$$", cleaned)
+    cleaned = re.sub(r"\\begin\{equation\*?\}", "$$", cleaned)
+    cleaned = re.sub(r"\\end\{equation\*?\}", "$$", cleaned)
+    cleaned = re.sub(r"\\begin\{gather\*?\}", "$$", cleaned)
+    cleaned = re.sub(r"\\end\{gather\*?\}", "$$", cleaned)
+    cleaned = cleaned.replace(r"\left", "").replace(r"\right", "")
+    cleaned = cleaned.replace(r"\quad", " ").replace(r"\qquad", " ")
+    cleaned = cleaned.replace(r"\&", " ")
+    cleaned = cleaned.replace(r"\\", "\n")
+
+    spoken = [
+        (r"\bopen\s+parenthesis\b", "("),
+        (r"\bclose\s+parenthesis\b", ")"),
+        (r"\bopen\s+paren\b", "("),
+        (r"\bclose\s+paren\b", ")"),
+        (r"\bleft\s+parenthesis\b", "("),
+        (r"\bright\s+parenthesis\b", ")"),
+        (r"\bforward\s+slash\b", "/"),
+        (r"\bright\s+slash\b", "/"),
+        (r"\bleft\s+slash\b", "/"),
+        (r"\bslash\b", "/"),
+        (r"\bopen\s+print\b", ""),
+        (r"\bbegin\s+align\b", ""),
+        (r"\bend\s+align\b", ""),
+        (r"\bbegin\s+equation\b", ""),
+        (r"\bend\s+equation\b", ""),
+        (r"\bdfrac\b", ""),
+        (r"\bfrac\b", ""),
+        (r"\btext\b", ""),
+        (r"\bquad\b", " "),
+    ]
+    for pattern, repl in spoken:
+        cleaned = re.sub(pattern, repl, cleaned, flags=re.IGNORECASE)
+
+    # Compound inequalities should not use the word AND.
+    cleaned = re.sub(
+        r"(\d+)\s+AND\s+",
+        r"\1, ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\bAND\b(?=\s*[-+]?\d|\s*[a-zA-Z]=|\s*[<>])",
+        ",",
+        cleaned,
+    )
+
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def render_math_markdown(text: str) -> None:
     """Show study text with real equations instead of spoken symbols."""
     if not text:
         return
+    text = cleanup_math_text(text)
     parts = re.split(r"(\$\$.*?\$\$|\$(?!\$).*?\$)", text, flags=re.DOTALL)
     for part in parts:
         if not part:

@@ -1079,6 +1079,11 @@ def render_test_review_tool() -> None:
     if latest:
         st.markdown("#### Latest review")
         render_math_markdown(latest)
+        render_print_button(
+            latest,
+            test_name.strip() or "Test Review",
+            key="latest_review_print",
+        )
 
     reviews = load_test_reviews(
         class_name=class_name
@@ -1105,9 +1110,12 @@ def render_test_review_tool() -> None:
                         caption="Returned test",
                     )
 
-                render_math_markdown(
-                    row.get("analysis_markdown")
-                    or ""
+                review_text = row.get("analysis_markdown") or ""
+                render_math_markdown(review_text)
+                render_print_button(
+                    review_text,
+                    str(label),
+                    key=f"review_print_{row.get('id')}",
                 )
 
 
@@ -2881,20 +2889,25 @@ def ask_locked_in_followup(
         conversation_text.append(f"{role.upper()}: {content}")
 
     prompt = f"""
-You are Locked In, an AI study coach for a high school student.
+You are a calm 11th-grade tutor helping with ONE assignment.
 
-Answer follow-up questions about ONE assignment using the assignment context
-and saved study materials below.
+Answer the student's question using the assignment context and saved study
+materials below.
+
+Write like a good tutor:
+- Restate the problem in worksheet math, such as $4x-13>7$.
+- Explain the idea in plain English first.
+- Then show short steps, with one sentence after each equation.
+- End with the final answer on its own line.
+- Mention one common mistake if useful.
 
 Rules:
 - Ground answers in the provided study materials whenever possible.
 - If the student has attached a new image, use it as additional context.
 - Do not invent facts that are not supported by the materials or image.
 - If the materials do not contain enough information, say that clearly.
-- If the student is asking about a math or homework problem, walk through the
-  solution step by step in a helpful, student-friendly way.
-- Keep answers concise, clear, and encouraging.
-- Write all math in LaTeX, the way it appears on a test. Never describe symbols in words.
+- Never write begin, end, align, frac, slash, AND, left, or right.
+- Keep answers concise and easy to print.
 
 CONTEXT:
 {study_context}
@@ -3218,8 +3231,7 @@ def ask_study_helper(
     }
 
     prompt = f"""
-You are Locked In, an AI study coach helping a high school student with
-homework right now.
+You are a calm, clear 11th-grade math/homework tutor.
 
 ASSIGNMENT CONTEXT:
 {assignment_context}
@@ -3235,16 +3247,40 @@ STUDENT QUESTION:
 INSTRUCTIONS:
 {mode_rules.get(mode, mode_rules["Explain / answer a question"])}
 
-General rules:
+Write like a good tutor talking to one student, not like a textbook or a
+computer reading LaTeX out loud.
+
+Use this structure:
+
+## The problem
+Restate the exact visible problem in worksheet math, like $4x-13>7$.
+
+## What this is asking
+One or two plain sentences. No jargon unless needed.
+
+## How to start
+The first useful move.
+
+## Work it out
+Short steps. After each math step, one sentence in normal English.
+Example:
+1. Add 13 to both sides.
+   $4x>20$
+2. Divide both sides by 4.
+   $x>5$
+
+## Final answer
+Put the finished answer on its own line.
+
+## Watch out
+One common mistake for this kind of problem.
+
+Rules:
 - Use the attached image as the primary source when one is provided.
-- Read the actual problem and the student's visible work carefully.
-- Do not invent numbers, instructions, questions, or answers that are not visible.
-- If part of the image cannot be read, say exactly what is unclear.
-- For algebra/math, preserve the problem exactly and show mathematically valid steps.
-- Keep the response practical and concise enough to use while doing homework.
-- Write every equation, fraction, exponent, and root in LaTeX.
-- Restate the visible problem in LaTeX before explaining it.
-- If checking work, show the student's step and the corrected step in LaTeX.
+- Do not invent numbers or questions that are not visible.
+- If something is unreadable, say exactly what you cannot see.
+- Never write begin, end, align, frac, slash, AND, left, or right.
+- Inequalities use >, <, >=, or <=. Not the word AND.
 {MATH_OUTPUT_RULES}
 """.strip()
 
@@ -3388,6 +3424,11 @@ def render_study_question_helper(
     if last_answer:
         st.markdown("#### Locked In")
         render_math_markdown(last_answer)
+        render_print_button(
+            last_answer,
+            "Locked In Homework Help",
+            key=f"{key_prefix}_print_answer",
+        )
 
 
 
@@ -3666,9 +3707,10 @@ Rules:
     return response.output_text
 
 
-def practice_test_print_html(markdown_text: str, title: str) -> str:
+def study_print_html(markdown_text: str, title: str) -> str:
+    cleaned = cleanup_math_text(markdown_text)
     safe = (
-        markdown_text.replace("&", "&amp;")
+        cleaned.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
@@ -3684,15 +3726,15 @@ def practice_test_print_html(markdown_text: str, title: str) -> str:
 <title>{title}</title>
 <script>
 window.MathJax = {{
-  tex: {{ inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$']] }}
+  tex: {{ inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$', '$$']] }}
 }};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <style>
 body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto;
-       font-size: 16px; line-height: 1.55; }}
-h1 {{ margin-bottom: 24px; }}
-@media print {{ body {{ margin: 0.5in; }} }}
+       font-size: 17px; line-height: 1.6; }}
+h1, h2, h3 {{ margin-top: 1.2em; }}
+@media print {{ body {{ margin: 0.6in; }} }}
 </style>
 </head>
 <body>
@@ -3700,6 +3742,23 @@ h1 {{ margin-bottom: 24px; }}
 {safe}
 </body>
 </html>"""
+
+
+def render_print_button(text: str, title: str, key: str) -> None:
+    html = study_print_html(text, title)
+    safe_name = re.sub(r"[^a-zA-Z0-9]+", "_", title).strip("_").lower() or "locked_in"
+    st.download_button(
+        "🖨️ Print / save this",
+        data=html.encode("utf-8"),
+        file_name=f"{safe_name}.html",
+        mime="text/html",
+        key=key,
+    )
+    st.caption("Open the file on the phone or computer, then choose Print.")
+
+
+def practice_test_print_html(markdown_text: str, title: str) -> str:
+    return study_print_html(markdown_text, title)
 
 
 def page_today() -> None:

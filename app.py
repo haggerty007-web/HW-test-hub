@@ -2421,6 +2421,47 @@ Rules:
 
 
 
+MATH_OUTPUT_RULES = """
+MATH AND SCIENCE NOTATION RULES:
+Write math the way it appears on an 11th-grade test.
+
+Use LaTeX only. Never describe symbols in words.
+Never write: open parenthesis, close parenthesis, slash, right slash,
+left slash, frac, over, squared, cubed, or "the fraction".
+
+Use:
+- Inline math: $x^2+3x-4$
+- Fractions: $\\dfrac{2x+1}{x-5}$
+- Equations: $3(x-2)=4x+1$
+- Roots: $\\sqrt{x+1}$
+- Exponents: $2^{x+1}$
+
+Practice problems must look like a worksheet:
+
+1. Solve: $\\dfrac{x+3}{2}=5$
+2. Simplify: $(2x-1)(x+4)$
+
+Keep numbers, variables, and operations inside $...$.
+If the source is algebra, match that topic and difficulty.
+"""
+
+
+def render_math_markdown(text: str) -> None:
+    """Show study text with real equations instead of spoken symbols."""
+    if not text:
+        return
+    parts = re.split(r"(\$\$.*?\$\$|\$(?!\$).*?\$)", text, flags=re.DOTALL)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("$$") and part.endswith("$$"):
+            st.latex(part.strip("$").strip())
+        elif part.startswith("$") and part.endswith("$"):
+            st.latex(part.strip("$").strip())
+        else:
+            st.markdown(part)
+
+
 def study_prompt_from_image(output_type: str) -> str:
     return f"""
 You are helping an 11th grade student study from a photo of class notes, a study guide, worksheet, textbook page, or classroom handout.
@@ -2458,6 +2499,7 @@ Rules:
 - Keep it supportive and not overwhelming.
 - For literature: go beyond plot — include themes, character motivation, conflict, evidence, and possible essay questions.
 - For science/history: emphasize concepts, causes/effects, vocabulary in context, and application.
+{MATH_OUTPUT_RULES}
 """.strip()
 
 
@@ -2501,6 +2543,7 @@ Rules:
 - Keep it supportive and not overwhelming.
 - For literature: go beyond plot — include themes, character motivation, conflict, evidence, and possible essay questions.
 - For science/history: emphasize concepts, causes/effects, vocabulary in context, and application.
+{MATH_OUTPUT_RULES}
 """.strip()
 
 
@@ -2625,6 +2668,7 @@ For "summary":
 
 If the material is incomplete or unclear, say what needs to be checked.
 Keep the result calm, practical, and not overwhelming.
+{MATH_OUTPUT_RULES}
 """.strip()
 
 
@@ -2649,7 +2693,7 @@ def render_locked_in_study_tools(locked: pd.Series) -> None:
                         caption="Source material",
                     )
 
-                st.markdown(
+                render_math_markdown(
                     material.get("generated_markdown") or ""
                 )
 
@@ -3525,6 +3569,10 @@ Rules:
   --- ANSWER KEY ---
 - Then provide a numbered answer key.
 - Make the test clean enough to print directly.
+- If the source is algebra or any math, write every expression in LaTeX
+  exactly as it would appear on a school test.
+- Never describe math symbols in words.
+{MATH_OUTPUT_RULES}
 """.strip()
 
     content = [{"type": "input_text", "text": prompt}]
@@ -3561,6 +3609,12 @@ def practice_test_print_html(markdown_text: str, title: str) -> str:
 <head>
 <meta charset="utf-8">
 <title>{title}</title>
+<script>
+window.MathJax = {{
+  tex: {{ inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$']] }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <style>
 body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto;
        font-size: 16px; line-height: 1.55; }}
@@ -4484,7 +4538,7 @@ def page_study_tools() -> None:
             "study_first_practice_test"
         )
         if generated_test:
-            st.markdown(generated_test)
+            render_math_markdown(generated_test)
 
             print_title = (
                 f"{test_class or 'Locked In'} Practice Test"
